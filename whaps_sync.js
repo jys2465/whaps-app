@@ -1,4 +1,3 @@
-// whaps_sync.js : 날짜 포맷 고정 및 최신순 역순 정렬 연동
 const FIXED_GAS_URL = "https://script.google.com/macros/s/AKfycbxh-8Oo7FRn2Sv2GqgPrUmwpg1PM_PhzjUFe3p_l08LTUCXod-ebjCMdnwoGH3RiwAXKQ/exec";
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -6,7 +5,6 @@ document.addEventListener('DOMContentLoaded', () => {
     fetchAllData();
 });
 
-// 날짜 문자열을 YYYY-MM-DD로 깨끗하게 파싱하는 유틸 함수
 function cleanDateStr(rawDate) {
     if (!rawDate) return new Date().toISOString().slice(0, 10);
     let str = String(rawDate);
@@ -28,7 +26,6 @@ function cleanDateStr(rawDate) {
 function fetchAllData() {
     let gasUrl = localStorage.getItem('whaps_gas_url') || FIXED_GAS_URL;
     
-    // 1. 공지사항 동기화 (최신순 내림차순 정렬 적용)
     fetch(`${gasUrl}?sheet=공지`)
         .then(res => res.json())
         .then(res => {
@@ -40,7 +37,6 @@ function fetchAllData() {
                     date: cleanDateStr(item.작성일 || item.date),
                     content: item.내용 || item.content || ""
                 }));
-                // 번호 기준 내림차순(최신순) 정렬 보장
                 loadedNotices.sort((a, b) => b.id.localeCompare(a.id));
                 noticeDataStore = loadedNotices;
                 
@@ -49,7 +45,6 @@ function fetchAllData() {
             }
         }).catch(e => console.log("공지 로드 오류:", e));
 
-    // 2. 벤더 마스터 동기화
     fetch(`${gasUrl}?sheet=벤더`)
         .then(res => res.json())
         .then(res => {
@@ -60,7 +55,6 @@ function fetchAllData() {
             }
         }).catch(e => console.log("벤더 로드 오류:", e));
 
-    // 3. 상품 마스터 동기화
     fetch(`${gasUrl}?sheet=상품`)
         .then(res => res.json())
         .then(res => {

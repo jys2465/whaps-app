@@ -1,4 +1,3 @@
-// whaps_main.js : 3일 이내 NEW 아이콘 배지 적용, 최신순 정렬 및 탭 토글 완비
 let quillEditor;
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -69,7 +68,6 @@ function switchProd(mode) {
     }
 }
 
-// [NEW 기능] 3일 이내 작성된 글인지 판별하는 함수
 function isWithin3Days(dateStr) {
     if(!dateStr) return false;
     let postDate = new Date(dateStr);
@@ -79,7 +77,6 @@ function isWithin3Days(dateStr) {
     return diffDays >= 0 && diffDays <= 3;
 }
 
-// 공지 목록 렌더링 (최신순 정렬 및 3일 이내 NEW 아이콘 부착)
 function renderNotices() {
     let tbody = document.getElementById('notice-table-body');
     if(!tbody) return;
@@ -90,8 +87,6 @@ function renderNotices() {
         if(!item.id) return;
         let tr = document.createElement('tr');
         tr.style.cursor = 'pointer';
-        
-        // 3일 이내인 경우 NEW 배지 추가
         let newBadge = isWithin3Days(item.date) ? ` <span style="background:#ef4444; color:white; font-size:10px; padding:1px 4px; border-radius:4px; font-weight:bold;">NEW</span>` : '';
 
         tr.innerHTML = `<td>${item.id}</td><td>${item.title}${newBadge}</td><td>${item.writer || ''}</td><td>${item.date}</td>`;
@@ -109,7 +104,6 @@ function renderManageNotices() {
     sortedList.forEach(item => {
         if(!item.id) return;
         let tr = document.createElement('tr');
-        
         let newBadge = isWithin3Days(item.date) ? ` <span style="background:#ef4444; color:white; font-size:10px; padding:1px 4px; border-radius:4px; font-weight:bold;">NEW</span>` : '';
 
         tr.innerHTML = `
@@ -163,7 +157,7 @@ function saveNoticeFromTab() {
         }
         alert('공지사항이 수정되었습니다.');
     } else {
-        noticeDataStore.unshift(noticeData); // 메모리상에서도 맨 앞에 추가
+        noticeDataStore.unshift(noticeData);
         alert(`신규 공지사항이 등록되었습니다. (ID: ${noticeId})`);
     }
 
