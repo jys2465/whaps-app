@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>WHAPS 화프스 통합 운영 시스템</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link href="https://cdn.jsdelivr.net/npm/quill@1.3.7/dist/quill.snow.css" rel="stylesheet">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    <style>
+        body { font-family: 'Pretendard', sans-serif; background-color: #0f172a; color: #1e293b; user-select: none; }
+        .app-frame { max-width: 430px; margin: 0 auto; background: #f8fafc; min-height: 100vh; position: relative; box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25); display: flex; flex-direction: column; }
+        .tab-content, .home-sub-content, .sub-tab-content { display: none; }
+        .tab-content.active, .home-sub-content.active, .sub-tab-content.active { display: block; }
+        .pin-box { width: 45px; height: 45px; text-align: center; font-size: 22px; font-weight: bold; border: 2px solid #cbd5e1; border-radius: 8px; outline: none; -webkit-text-security: disc; }
+        .dash-card { background: white; border: 1px solid #e2e8f0; border-radius: 12px; padding: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }
+        .btn { padding: 6px 12px; border-radius: 6px; font-weight: 500; cursor: pointer; display: inline-flex; align-items: center; gap: 4px; font-size: 13px; }
+        .btn-primary { background-color: #2563eb; color: white; }
+        .btn-outline { border: 1px solid #cbd5e1; background: white; color: #475569; }
+        .btn-warning { background-color: #d97706; color: white; }
+        /* 칸이 모자랄 때 가로/세로 스크롤바가 생기도록 보장하는 테이블 컨테이너 */
+        .table-responsive { width: 100%; overflow-x: auto; overflow-y: auto; max-height: 350px; }
+        table { width: 100%; white-space: nowrap; }
+        table th { background-color: #f1f5f9; font-weight: 600; text-align: left; padding: 8px 12px; font-size: 12px; color: #475569; border-bottom: 2px solid #e2e8f0; }
+        table td { padding: 8px 12px; font-size: 12px; border-bottom: 1px solid #e2e8f0; }
+        /* 드롭다운 메뉴 스타일 */
+        .dropdown { position: relative; display: inline-block; }
+        .dropdown-content { display: none; position: absolute; background-color: white; min-width: 120px; box-shadow: 0px 8px 16px rgba(0,0,0,0.1); z-index: 50; border-radius: 6px; border: 1px solid #e2e8f0; }
+        .dropdown-content button { width: 100%; text-align: left; padding: 8px 12px; font-size: 12px; color: #334155; background: none; border: none; cursor: pointer; }
+        .dropdown-content button:hover { background-color: #f1f5f9; }
+        .dropdown:hover .dropdown-content { display: block; }
+    </style>
+</head>
+<body>
+    <div class="app-frame">
+        <!-- 로그인 화면 -->
+        <div id="login-container" class="fixed inset-0 bg-slate-900 z-50 flex items-center justify-center p-4 max-w-[430px] mx-auto">
+            <div class="bg-white rounded-2xl p-6 w-full shadow-2xl text-center">
+                <div class="w-full h-28 mx-auto flex items-center justify-center mb-3">
+                    <img src="wp1.png" alt="WP Logo" class="h-24 object-contain">
+                </div>
+                <h2 class="text-xl font-bold text-slate-800 mb-1">WHAPS 보안 로그인</h2>
+                <p class="text-xs text-slate-500 mb-4">4자리 보안 비밀번호를 입력해주세요</p>
+                <div class="flex justify-center gap-2 mb-4">
+                    <input type="password" maxlength="1" class="pin-box" autocomplete="off">
+                    <input type="password" maxlength="1" class="pin-box" autocomplete="off">
+                    <input type="password" maxlength="1" class="pin-box" autocomplete="off">
+                    <input type="password" maxlength="1" class="pin-box" autocomplete="off">
+                </div>
+                <button onclick="verifyLogin()" class="w-full btn btn-primary justify-center py-2.5 text-sm mb-3">로그인</button>
+                <div class="text-left border-t pt-3 text-xs">
+                    <div class="cursor-pointer text-slate-500 hover:text-blue-600 font-medium flex items-center gap-1" onclick="toggleHelpBox()">
+                        <span>❓ 비밀번호 분실 안내 (초기화 명령어)</span>
+                    </div>
+                    <div id="login-help-box" style="display:none;" class="mt-2 p-2.5 bg-slate-50 rounded text-slate-600 space-y-1.5 border">
+                        <p>실행창에 <code>clear!</code>를 치시면 비밀번호가 초기화됩니다.</p>
+                        <div class="flex gap-2">
+                            <input type="text" id="reset-code-input" placeholder="clear! 입력" class="border rounded px-2 py-1 text-xs w-full">
+                            <button class="btn btn-primary text-xs py-1 px-2" onclick="executeDeviceReset()">실행</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 메인 앱 컨테이너 -->
+        <div id="app-container" style="display: none;" class="flex flex-col flex-1">
+            <header class="bg-white border-b border-slate-200 sticky top-0 z-40">
+                <div class="px-4 flex items-center justify-between h-12 border-b border-slate-100">
+                    <div class="flex items-center gap-2">
+                        <img src="wp1.png" alt="Logo" class="h-8 object-contain">
+                        <span class="text-sm font-bold text-slate-800">WHAPS</span>
+                    </div>
+                    <div class="flex items-center gap-2">
+                        <span id="user-role-badge" class="text-[11px] px-2 py-0.5 rounded-full font-medium bg-slate-100 text-slate-600">권한</span>
+                        <button onclick="logout()" class="text-xs text-slate-500 hover:text-red-600"><i class="fa-solid fa-right-from-bracket"></i></button>
+                    </div>
+                </div>
+                <!-- 2줄 정렬 내비게이션 바 -->
+                <nav class="flex flex-wrap gap-1 px-2 py-2 text-xs font-medium bg-slate-50">
+                    <button class="tab-btn active px-2 py-1 rounded bg-blue-50 text-blue-600" onclick="switchTab('tab-home')">홈</button>
+                    <div class="dropdown">
+                        <button class="tab-btn px-2 py-1 rounded text-slate-600">코드관리 ▼</button>
+                        <div class="dropdown-content">
+                            <button onclick="switchTab('tab-category')">분류관리</button>
+                            <button onclick="switchTab('tab-warehouse')">창고관리</button>
+                            <button onclick="switchTab('tab-account')">계정관리</button>
+                        </div>
+                    </div>
+                    <button class="tab-btn px-2 py-1 rounded text-slate-600" onclick="switchTab('tab-contract')">계약관리</button>
+                    <button class="tab-btn px-2 py-1 rounded text-slate-600" onclick="switchTab('tab-vendor')">벤더관리</button>
+                    <button class="tab-btn px-2 py-1 rounded text-slate-600" onclick="switchTab('tab-product')">상품관리</button>
+                    <button class="tab-btn px-2 py-1 rounded text-slate-600" onclick="switchTab('tab-order')">주문관리</button>
+                    <button class="tab-btn px-2 py-1 rounded text-slate-600" onclick="switchTab('tab-purchase')">매입관리</button>
+                    <button class="tab-btn px-2 py-1 rounded text-slate-600" onclick="switchTab('tab-expense')">비용관리</button>
+                    <button class="tab-btn px-2 py-1 rounded text-slate-600" onclick="switchTab('tab-sales')">매출관리</button>
+                    <button class="tab-btn px-2 py-1 rounded text-slate-600" onclick="switchTab('tab-settlement')">정산관리</button>
+                    <button class="tab-btn px-2 py-1 rounded text-slate-600" onclick="switchTab('tab-profit')">손익관리</button>
+                    <button class="tab-btn px-2 py-1 rounded text-slate-600" onclick="switchTab('tab-setting')">설정</button>
+                </nav>
+            </header>
+
+            <main class="flex-1 p-4 space-y-4 overflow-y-auto pb-16">
+                <!-- 1. 홈 탭 -->
+                <div id="tab-home" class="tab-content active space-y-4">
+                    <div class="flex gap-2 border-b pb-2">
+                        <button id="home-sub-btn-dash" class="home-sub-btn active btn btn-primary text-xs" onclick="switchHomeSubTab('home-sub-dash')">대시보드</button>
+                        <button id="home-sub-btn-notice" class="home-sub-btn btn btn-outline text-xs" onclick="switchHomeSubTab('home-sub-notice')">공지 등록</button>
+                    </div>
+
+                    <div id="home-sub-dash" class="home-sub-content active space-y-4">
+                        <div class="dash-card bg-gradient-to-r from-blue-600 to-indigo-600 text-white">
+                            <p id="quote-text-box" class="text-sm font-medium italic">"품질은 우연이 아니라 항상 노력의 결과이다."</p>
+                            <p id="quote-author-box" class="text-[11px] text-blue-200 mt-1">- 존 러킨 -</p>
+                        </div>
+                        <div class="dash-card">
+                            <h3 class="text-xs font-bold text-slate-800 mb-2">공지사항 및 운영 소식</h3>
+                            <div class="table-responsive">
+                                <table class="w-full">
+                                    <thead><tr><th>번호</th><th>제목</th><th>작성자</th><th>작성일</th></tr></thead>
+                                    <tbody id="notice-table-body"></tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div id="home-sub-notice" class="home-sub-content space-y-4">
+                        <div class="dash-card space-y-3">
+                            <input type="hidden" id="edit-notice-id" value="">
+                            <h3 id="notice-form-heading" class="text-xs font-bold text-slate-800">신규 공지사항 등록</h3>
+                            <input type="text" id="man-notice-title" placeholder="제목" class="w-full border rounded p-1.5 text-xs">
+                            <input type="text" id="man-notice-writer" placeholder="작성자" class="w-full border rounded p-1.5 text-xs">
+                            <div id="editor-container" style="height: 150px; background: white;"></div>
+                            
+                            <div id="notice-btn-container" class="flex gap-2">
+                                <button type="button" id="notice-submit-btn" class="btn btn-primary w-full justify-center" onclick="saveNoticeFromTab()">공지 등록하기</button>
+                            </div>
+                        </div>
+
+                        <div class="dash-card">
+                            <h3 class="text-xs font-bold text-slate-800 mb-2">공지 목록 관리</h3>
+                            <div class="table-responsive">
+                                <table class="w-full">
+                                    <thead><tr><th>번호</th><th>제목</th><th>작성자</th><th>작성일</th><th>관리</th></tr></thead>
+                                    <tbody id="manage-notice-table-body"></tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 기타 관리 탭들 -->
+                <div id="tab-contract" class="tab-content space-y-4">
+                    <div class="dash-card space-y-3">
+                        <h3 class="text-xs font-bold">계약서 신청 및 양식 생성</h3>
+                        <select id="con-kind" class="w-full border rounded p-1.5 text-xs" onchange="updatePreview()">
+                            <option>01. 상품 공급 기본거래계약서 (직매입)</option>
+                            <option>02. 위수탁 물류 대행 계약서 (3PL)</option>
+                        </select>
+                        <input type="text" id="con-vendor" placeholder="거래처명" class="w-full border rounded p-1.5 text-xs" value="(주)제주농원" oninput="updatePreview()">
+                        <input type="text" id="con-ceo" placeholder="대표이사" class="w-full border rounded p-1.5 text-xs" value="김제주" oninput="updatePreview()">
+                        <button class="btn btn-primary w-full justify-center" onclick="downloadContractPdf()">PDF 출력 및 저장</button>
+                    </div>
+                    <div class="dash-card bg-slate-50">
+                        <div id="contract-preview-target" class="bg-white p-4 rounded border text-xs space-y-2 relative">
+                            <div class="absolute right-4 top-4 opacity-15"><img src="gwc1.png" style="width:60px;"></div>
+                            <h2 id="prev-title" class="font-bold text-center">계약서 제목</h2>
+                            <div id="contract-template-body"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 벤더관리 탭 (조회/등록 탭 색상 토글 반영) -->
+                <div id="tab-vendor" class="tab-content space-y-4">
+                    <div class="flex gap-2 border-b pb-2">
+                        <button id="sub-btn-vendor-list" class="sub-vendor-tab btn btn-primary text-xs" onclick="switchSub('vendor', 'list')">조회</button>
+                        <button id="sub-btn-vendor-reg" class="sub-vendor-tab btn btn-outline text-xs" onclick="switchSub('vendor', 'reg')">등록</button>
+                    </div>
+                    <div id="vendor-list" class="sub-sec dash-card">
+                        <div class="table-responsive">
+                            <table class="w-full">
+                                <thead><tr><th>코드</th><th>업체명</th><th>대표자</th><th>관리</th></tr></thead>
+                                <tbody id="saved-vendor-table"></tbody>
+                            </table>
+                        </div>
+                    </div>
+                    <div id="vendor-reg" class="sub-sec dash-card space-y-3" style="display:none;">
+                        <input type="text" id="ven-code" placeholder="업체코드 (V1)" class="w-full border rounded p-1.5 text-xs">
+                        <input type="text" id="ven-name" placeholder="상호명" class="w-full border rounded p-1.5 text-xs">
+                        <input type="text" id="ven-ceo" placeholder="대표자명" class="w-full border rounded p-1.5 text-xs">
+                        <button class="btn btn-primary w-full justify-center" onclick="saveVendor()">벤더 등록</button>
+                    </div>
+                </div>
+
+                <!-- 상품관리 탭 (조회/등록 탭 색상 토글 반영) -->
+                <div id="tab-product" class="tab-content space-y-4">
+                    <div class="flex gap-2 border-b pb-2">
+                        <button id="sub-btn-prod-list" class="sub-prod-tab btn btn-primary text-xs" onclick="switchProd('list')">조회</button>
+                        <button id="sub-btn-prod-reg" class="sub-prod-tab btn btn-outline text-xs" onclick="switchProd('reg')">등록</button>
+                    </div>
+                    <div id="prod-list" class="dash-card">
+                        <div class="table-responsive">
+                            <table class="w-full">
+                                <thead><tr><th>상품코드</th><th>상품명</th><th>판매가</th></tr></thead>
+                                <tbody id="saved-product-table"></tbody>
+                            </table>
+                        </div>
+                    </div>
+                    <div id="prod-reg" class="dash-card space-y-3" style="display:none;">
+                        <input type="text" id="prod-code" placeholder="상품코드" class="w-full border rounded p-1.5 text-xs">
+                        <input type="text" id="prod-name" placeholder="상품명" class="w-full border rounded p-1.5 text-xs">
+                        <input type="number" id="prod-price" placeholder="판매가" class="w-full border rounded p-1.5 text-xs">
+                        <button class="btn btn-primary w-full justify-center" onclick="saveProduct()">상품 등록</button>
+                    </div>
+                </div>
+
+                <div id="tab-warehouse" class="tab-content dash-card"><h3 class="text-xs font-bold mb-2">창고관리</h3><div class="table-responsive"><table class="w-full"><thead><tr><th>코드</th><th>창고명</th></tr></thead><tbody id="saved-warehouse-table"></tbody></table></div></div>
+                <div id="tab-category" class="tab-content dash-card"><h3 class="text-xs font-bold mb-2">분류관리</h3><div class="table-responsive"><table class="w-full"><thead><tr><th>대분류</th><th>중분류</th></tr></thead><tbody id="saved-category-table"></tbody></table></div></div>
+                <div id="tab-account" class="tab-content dash-card"><h3 class="text-xs font-bold mb-2">계정관리</h3><p class="text-xs text-slate-500">회계 계정 과목 마스터 관리 영역</p></div>
+                <div id="tab-order" class="tab-content dash-card space-y-3"><h3 class="text-xs font-bold">주문관리 업로드 (엑셀)</h3><input type="file" id="excel-file-input" class="text-xs" onchange="handleExcelUpload(event)"><div class="table-responsive mt-2"><table class="w-full"><thead><tr><th>주문번호</th><th>상품명</th></tr></thead><tbody id="order-table-body"></tbody></table></div></div>
+                <div id="tab-purchase" class="tab-content dash-card"><h3 class="text-xs font-bold">매입관리 분석</h3></div>
+                <div id="tab-expense" class="tab-content dash-card"><h3 class="text-xs font-bold">비용관리 분석</h3></div>
+                <div id="tab-sales" class="tab-content dash-card"><h3 class="text-xs font-bold">매출관리 분석</h3></div>
+                <div id="tab-settlement" class="tab-content dash-card"><h3 class="text-xs font-bold">정산관리 분석</h3></div>
+                <div id="tab-profit" class="tab-content dash-card"><h3 class="text-xs font-bold">손익관리 분석</h3></div>
+                <div id="tab-setting" class="tab-content dash-card"><h3 class="text-xs font-bold">설정</h3><p class="text-xs text-slate-500">구글시트 URL 연동 완료</p></div>
+            </main>
+        </div>
+    </div>
+
+    <!-- 상세 모달 -->
+    <div id="noticeModal" style="display:none;" class="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+        <div class="bg-white rounded-xl p-4 w-full max-w-sm space-y-3">
+            <h3 id="modal-notice-title" class="font-bold text-sm border-b pb-1"></h3>
+            <div id="notice-modal-body" class="text-xs text-slate-600 max-h-60 overflow-y-auto"></div>
+            <button class="btn btn-outline w-full justify-center text-xs" onclick="closeModal('noticeModal')">닫기</button>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/quill@1.3.7/dist/quill.min.js"></script>
+    <script src="whaps_data.js"></script>
+    <script src="whaps_sync.js"></script>
+    <script src="whaps_auth.js"></script>
+    <script src="whaps_main.js"></script>
+</body>
+</html>
