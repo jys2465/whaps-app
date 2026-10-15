@@ -1046,7 +1046,7 @@ function viewMore() {
       isStaff() ? item('#/settings', '회사 정보·선택 목록·계약서 로고', '계약서에 들어가는 우리 회사 정보와 키값 목록') : null),
     el('h2', null, '2단계에서 열리는 메뉴'),
     el('div', { class: 'list' }, ['주문관리', '매입관리', '비용관리', '매출관리', '정산관리', '손익관리'].map(t => el('div', { class: 'row' }, el('div', { class: 'main' }, el('div', { class: 't', style: 'color:var(--muted)' }, t)), el('span', { class: 'tag' }, '12월 이후')))),
-    el('p', { class: 'lead', style: 'margin-top:16px' }, '화프스 v2.3.1 · ' + S.user.id + ' (' + S.user.role + ')'));
+    el('p', { class: 'lead', style: 'margin-top:16px' }, '화프스 v2.3.2 · ' + S.user.id + ' (' + S.user.role + ')'));
 }
 async function viewNotices() {
   const list = (await ensureData()).notices;
