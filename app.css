@@ -131,16 +131,34 @@ nav.tabs a.on { color: var(--navy); font-weight: 700; }
 .paper td.h { background: #EEF1F6; font-weight: 700; text-align: center; }
 .fv { font-weight: 700; text-decoration: underline; text-underline-offset: 2px; }
 /* 서명 블록: 선 없음, 좌우 균등, 긴 글은 자동 줄바꿈 */
-.paper .party { display: grid; grid-template-columns: 1fr 1fr; gap: 28px; margin: 6px 0 10px; }
-.paper .party .ttl { font-weight: 800; color: var(--navy); margin-bottom: 6px; }
-.paper .party .ln { display: grid; grid-template-columns: 8.4em 1fr; gap: 6px; margin: 3px 0; overflow-wrap: anywhere; word-break: keep-all; }
-.paper .party .lb { color: #555; white-space: nowrap; }
+.paper .party, .pg .party { display: grid; grid-template-columns: 1fr 1fr; column-gap: 10mm; row-gap: 0; align-items: start; }
+.paper .party .ttl, .pg .party .ttl { font-weight: 800; color: var(--navy); margin-bottom: 2mm; }
+.paper .party .ln, .pg .party .ln { display: grid; grid-template-columns: 8.4em 1fr; gap: 6px; margin: 1mm 0; overflow-wrap: anywhere; word-break: keep-all; }
+.paper .party .lb, .pg .party .lb { color: #555; white-space: nowrap; }
+.paper .party .vl, .pg .party .vl { white-space: pre-wrap; }
 .paper .sp { padding-left: 10px; margin: 4px 0 8px; }
 .paper .sp p { margin: 0 0 3px; white-space: pre-wrap; }
-.paper p.center { letter-spacing: .05em; white-space: pre; }
+.paper p.center { letter-spacing: .05em; white-space: pre; margin: 22mm 0 16mm; }
 .paper p.note { background: none; padding: 0; border-radius: 0; }
-.print-logo { display: none; }
-.miss { background: #FFF1B8; color: #6B4F00; padding: 0 3px; border-radius: 3px; font-weight: 600; }
+
+/* 인쇄용 A4 쪽 (미리보기 인쇄) */
+#print-root { position: absolute; left: -10000px; top: 0; }
+.pg { width: 210mm; height: 297mm; box-sizing: border-box; padding: 20mm 20mm 35mm; position: relative; overflow: hidden;
+  background: #fff; color: #111; font-family: "Noto Sans KR", sans-serif; font-size: 9.6pt; line-height: 1.65; }
+.pg-body { height: 100%; }
+.pg .doc-title { text-align: center; font-size: 16pt; font-weight: 800; color: var(--navy); margin: 0; padding-bottom: 7mm; }
+.pg p { margin: 0; padding-bottom: 1.1mm; }
+.pg p.h { font-weight: 700; padding-top: 3.2mm; padding-bottom: .8mm; }
+.pg .sp { padding: 0 0 1.5mm 3mm; }
+.pg .sp p { padding-bottom: .6mm; }
+.pg table { width: 100%; border-collapse: collapse; margin: 0 0 2mm; font-size: 8.8pt; }
+.pg td { border: 1px solid #C9CED8; padding: 1.2mm 2mm; vertical-align: top; white-space: pre-line; }
+.pg td.h { background: #EEF1F6; font-weight: 700; text-align: center; }
+.pg .sig { padding-top: 25mm; }                       /* 마지막 문단과 계약일 사이 2.5cm */
+.pg .sig p.center { text-align: center; white-space: pre; letter-spacing: .05em; font-size: 10.5pt; padding-bottom: 20mm; }  /* 계약일과 당사자 사이 2cm */
+.pg .sig p.note { background: none; border-radius: 0; font-size: 8pt; color: #666; font-style: italic; padding: 4mm 0 0; }
+.pg-logo { position: absolute; left: 50%; bottom: 13mm; transform: translateX(-50%); width: 26mm; }   /* 본문 끝과 약 1.5cm 간격 */
+.pg-num { position: absolute; right: 20mm; bottom: 13mm; font-size: 8.5pt; color: #666; }
 
 /* 로그인 */
 .login { min-height: 100vh; display: grid; place-items: center; padding: 24px; background: #fff; }
@@ -156,11 +174,10 @@ nav.tabs a.on { color: var(--navy); font-weight: 700; }
 .secret { font-family: ui-monospace, Menlo, monospace; font-size: 20px; letter-spacing: .08em; background: #F5F7FA; padding: 10px 12px; border-radius: 8px; user-select: all; }
 
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
-@page { size: A4; margin: 20mm 20mm 24mm 20mm; }
+@page { size: A4; margin: 0; }
 @media print {
-  .print-logo { display: block; position: fixed; bottom: 0; left: 50%; transform: translateX(-50%); width: 26mm; visibility: visible; }
-  body * { visibility: hidden; }
-  .paper, .paper * { visibility: visible; }
-  .paper { position: absolute; left: 0; top: 0; width: 100%; border: 0; box-shadow: none; padding: 0; }
-  .miss { background: none; }
+  body > * { display: none !important; }
+  body > #print-root { display: block !important; position: static; }
+  .pg { break-after: page; }
+  .pg:last-child { break-after: auto; }
 }

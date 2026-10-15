@@ -1,4 +1,4 @@
-/* 화프스(WHAPS) 화면 v2.1 — 데이터는 모두 서버(Apps Script)를 거칩니다. 화면에는 비밀을 두지 않습니다. */
+/* 화프스(WHAPS) 화면 v2.2 — 데이터는 모두 서버(Apps Script)를 거칩니다. 화면에는 비밀을 두지 않습니다. */
 'use strict';
 
 const S = { token: null, user: null, settings: {}, data: null, detail: {}, wide: false, flash: null };
@@ -173,25 +173,75 @@ function fillNodes(text, values, settings) {
   if (last < text.length) out.push(text.slice(last));
   return out;
 }
-function renderDoc(tpl, values, settings) {
-  const box = el('article', { class: 'paper', 'aria-label': '계약서 미리보기' });
-  tpl.blocks.forEach(b => {
-    if (b.t === 'title') box.appendChild(el('h2', { class: 'doc-title' }, fillNodes(b.x, values, settings)));
-    else if (b.t === 'party') {
-      box.appendChild(el('div', { class: 'party' }, ['left', 'right'].map(side => el('div', null,
-        el('div', { class: 'ttl' }, b[side].title),
-        b[side].lines.map(ln => el('div', { class: 'ln' }, el('span', { class: 'lb' }, ln[0]), el('span', null, fillNodes(ln[1], values, settings))))))));
-    } else if (b.t === 'sp') {
+// 계약서 블록을 화면 요소로 만듭니다(화면 미리보기와 인쇄가 함께 씀).
+function docNodes(tpl, values, settings) {
+  return tpl.blocks.map(b => {
+    if (b.t === 'title') return { t: b.t, node: el('h2', { class: 'doc-title' }, fillNodes(b.x, values, settings)) };
+    if (b.t === 'party') {                       // 좌우 같은 항목을 같은 줄에(대표자·도장 자리가 나란히)
+      const L = b.left.lines, R = b.right.lines;
+      const cells = [el('div', { class: 'ttl' }, b.left.title), el('div', { class: 'ttl' }, b.right.title)];
+      for (let i = 0; i < Math.max(L.length, R.length); i++) {
+        [L[i], R[i]].forEach(ln => cells.push(ln ? el('div', { class: 'ln' }, el('span', { class: 'lb' }, ln[0]), el('span', { class: 'vl' }, fillNodes(ln[1], values, settings))) : el('div')));
+      }
+      return { t: b.t, node: el('div', { class: 'party' }, cells) };
+    }
+    if (b.t === 'sp') {
       const v = String(values['특약사항'] || '').trim();
-      box.appendChild(el('div', { class: 'sp' }, v ? v.split(/\r?\n/).filter(x => x.trim()).map(line => el('p', null, el('span', { class: 'fv' }, line))) : el('p', null, el('span', { class: 'fv' }, '없음'))));
-    } else if (b.t === 'table') {
+      return { t: b.t, node: el('div', { class: 'sp' }, (v ? v.split(/\r?\n/).filter(x => x.trim()) : ['없음']).map(line => el('p', null, el('span', { class: 'fv' }, line)))) };
+    }
+    if (b.t === 'table') {
       const tb = el('table');
       b.rows.forEach(r => tb.appendChild(el('tr', null, r.map(c => el('td', { class: c.h ? 'h' : null, colspan: c.s ? String(c.s) : null }, fillNodes(c.x, values, settings))))));
-      box.appendChild(tb);
-    } else box.appendChild(el('p', { class: b.t === 'p' ? null : b.t }, fillNodes(b.x, values, settings)));
+      return { t: b.t, node: tb };
+    }
+    return { t: b.t, node: el('p', { class: b.t === 'p' ? null : b.t }, fillNodes(b.x, values, settings)) };
   });
-  box.appendChild(el('img', { class: 'print-logo', src: 'gcw1.png', alt: '' }));
+}
+function renderDoc(tpl, values, settings) {
+  const box = el('article', { class: 'paper', 'aria-label': '계약서 미리보기' });
+  docNodes(tpl, values, settings).forEach(n => box.appendChild(n.node));
   return box;
+}
+// 인쇄: A4 쪽을 직접 나눠 그립니다. 여백을 0으로 두어 브라우저가 날짜·제목·주소를 붙이지 않게 하고,
+// 쪽마다 아래 가운데 로고와 오른쪽 아래 쪽 번호를 넣습니다.
+async function printDoc(tpl, values, settings) {
+  const prev = document.getElementById('print-root');
+  if (prev) prev.remove();
+  const root = el('div', { id: 'print-root', 'aria-hidden': 'true' });
+  document.body.appendChild(root);
+  if (document.fonts && document.fonts.ready) await document.fonts.ready;
+  const probe = el('section', { class: 'pg' }, el('div', { class: 'pg-body' }));
+  root.appendChild(probe);
+  const box = probe.firstChild;
+  const avail = box.getBoundingClientRect().height;
+  const nodes = docNodes(tpl, values, settings);
+  const items = [];
+  for (let i = 0; i < nodes.length; i++) {
+    const n = nodes[i];
+    if (n.t === 'center') {                        // 계약일 + 당사자 + 안내문은 한 덩어리로(쪽이 갈리지 않게)
+      const grp = el('div', { class: 'sig' }, n.node);
+      while (nodes[i + 1] && (nodes[i + 1].t === 'party' || nodes[i + 1].t === 'note')) grp.appendChild(nodes[++i].node);
+      items.push({ node: grp });
+    } else items.push({ node: n.node, keepNext: n.t === 'h' || n.t === 'title' });
+  }
+  items.forEach(it => { box.appendChild(it.node); it.h = it.node.getBoundingClientRect().height; });
+  const pages = [[]];
+  let used = 0;
+  items.forEach((it, i) => {
+    const need = it.h + (it.keepNext && items[i + 1] ? items[i + 1].h : 0);
+    if (used + need > avail + 0.5 && pages[pages.length - 1].length) { pages.push([]); used = 0; }
+    pages[pages.length - 1].push(it);
+    used += it.h;
+  });
+  probe.remove();
+  pages.forEach((list, idx) => root.appendChild(el('section', { class: 'pg' },
+    el('div', { class: 'pg-body' }, list.map(it => it.node)),
+    el('img', { class: 'pg-logo', src: 'gcw1.png', alt: '' }),
+    el('div', { class: 'pg-num' }, (idx + 1) + ' / ' + pages.length))));
+  await Promise.all(Array.from(root.querySelectorAll('img')).map(img => (img.complete ? null : new Promise(r => { img.onload = r; img.onerror = r; }))));
+  const cleanup = () => { root.remove(); window.removeEventListener('afterprint', cleanup); };
+  window.addEventListener('afterprint', cleanup);
+  window.print();
 }
 function partyValues(vendor) {
   const masked = s => /\*/.test(String(s || ''));
@@ -549,7 +599,7 @@ async function viewContractEdit(id) {
     location.hash = '#/contract/' + encodeURIComponent(d.contract.id);
   });
   const bPrint = el('button', { class: 'btn ghost' }, '미리보기 인쇄');
-  bPrint.onclick = () => window.print();
+  bPrint.onclick = () => act(bPrint, () => printDoc(tpl(), values, S.settings));
   const bDel = el('button', { class: 'btn ghost' }, '초안 지우기');
   bDel.onclick = () => act(bDel, async () => {
     if (!curId) { location.hash = '#/contracts'; return; }
@@ -908,7 +958,7 @@ function viewMore() {
       bOut),
     el('h2', null, '2단계에서 열리는 메뉴'),
     el('div', { class: 'list' }, ['주문관리', '매입관리', '비용관리', '매출관리', '정산관리', '손익관리'].map(t => el('div', { class: 'row' }, el('div', { class: 'main' }, el('div', { class: 't', style: 'color:var(--muted)' }, t)), el('span', { class: 'tag' }, '12월 이후')))),
-    el('p', { class: 'lead', style: 'margin-top:16px' }, '화프스 v2.1 · ' + S.user.id + ' (' + S.user.role + ')'));
+    el('p', { class: 'lead', style: 'margin-top:16px' }, '화프스 v2.2 · ' + S.user.id + ' (' + S.user.role + ')'));
 }
 async function viewNotices() {
   const list = (await ensureData()).notices;
