@@ -13,7 +13,7 @@
   --focus: #3D6FD9;
   --r: 10px;
   --nav-h: 64px;
-  font-family: "Pretendard Variable", Pretendard, -apple-system, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
+  font-family: "Noto Sans KR", -apple-system, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
   color: var(--text);
   background: var(--paper);
   font-size: 16px;
@@ -130,6 +130,16 @@ nav.tabs a.on { color: var(--navy); font-weight: 700; }
 .paper td { border: 1px solid #C9CED8; padding: 6px 8px; vertical-align: top; white-space: pre-line; }
 .paper td.h { background: #EEF1F6; font-weight: 700; text-align: center; }
 .fv { font-weight: 700; text-decoration: underline; text-underline-offset: 2px; }
+/* 서명 블록: 선 없음, 좌우 균등, 긴 글은 자동 줄바꿈 */
+.paper .party { display: grid; grid-template-columns: 1fr 1fr; gap: 28px; margin: 6px 0 10px; }
+.paper .party .ttl { font-weight: 800; color: var(--navy); margin-bottom: 6px; }
+.paper .party .ln { display: grid; grid-template-columns: 8.4em 1fr; gap: 6px; margin: 3px 0; overflow-wrap: anywhere; word-break: keep-all; }
+.paper .party .lb { color: #555; white-space: nowrap; }
+.paper .sp { padding-left: 10px; margin: 4px 0 8px; }
+.paper .sp p { margin: 0 0 3px; white-space: pre-wrap; }
+.paper p.center { letter-spacing: .05em; white-space: pre; }
+.paper p.note { background: none; padding: 0; border-radius: 0; }
+.print-logo { display: none; }
 .miss { background: #FFF1B8; color: #6B4F00; padding: 0 3px; border-radius: 3px; font-weight: 600; }
 
 /* 로그인 */
@@ -146,7 +156,9 @@ nav.tabs a.on { color: var(--navy); font-weight: 700; }
 .secret { font-family: ui-monospace, Menlo, monospace; font-size: 20px; letter-spacing: .08em; background: #F5F7FA; padding: 10px 12px; border-radius: 8px; user-select: all; }
 
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+@page { size: A4; margin: 20mm 20mm 24mm 20mm; }
 @media print {
+  .print-logo { display: block; position: fixed; bottom: 0; left: 50%; transform: translateX(-50%); width: 26mm; visibility: visible; }
   body * { visibility: hidden; }
   .paper, .paper * { visibility: visible; }
   .paper { position: absolute; left: 0; top: 0; width: 100%; border: 0; box-shadow: none; padding: 0; }
