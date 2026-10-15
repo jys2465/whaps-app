@@ -54,6 +54,14 @@ function toast(msg, kind) {
   box.appendChild(t);
   setTimeout(() => t.remove(), kind === 'err' ? 6000 : 3000);
 }
+// 화면 조각을 붙입니다. 목록은 펼치고, 빈 값(null)은 건너뜁니다(브라우저 기본 append는 목록·null을 글자로 찍음).
+function appendKids(parent, ...kids) {
+  kids.flat(Infinity).forEach(k => {
+    if (k === null || k === undefined || k === false) return;
+    parent.appendChild(typeof k === 'string' || typeof k === 'number' ? document.createTextNode(String(k)) : k);
+  });
+  return parent;
+}
 function field(label, input, hint, cls) {
   return el('label', { class: 'field' + (cls ? ' ' + cls : '') }, el('span', null, label), input, hint ? el('small', null, hint) : null);
 }
@@ -923,7 +931,7 @@ async function viewMasters(tab) {
     };
     q.addEventListener('input', draw);
     draw();
-    head.append(el('div', { class: 'form', style: 'padding:10px' }, q), excelBar('vendors'),
+    appendKids(head, el('div', { class: 'form', style: 'padding:10px' }, q), excelBar('vendors'),
       canEdit() ? el('div', { class: 'actions' }, el('a', { class: 'btn primary', href: '#/vendor/new' }, '벤더 등록')) : null, box);
     return head;
   }
@@ -938,7 +946,7 @@ async function viewMasters(tab) {
     });
     const groups = {};
     list.forEach(c => { (groups[c.대분류] = groups[c.대분류] || []).push(c); });
-    head.append(excelBar('categories'),
+    appendKids(head, excelBar('categories'),
       isStaff() ? el('div', { class: 'form' }, el('div', { class: 'two' }, field('대분류', big), field('중분류', mid)), el('div', { class: 'two' }, field('소분류', small), field('고객 노출', show)), field('체계 버전', ver, 'v3 유지와 9+1 신안 중 결정 전이라 둘 다 담을 수 있습니다'), bAdd) : null,
       Object.keys(groups).length ? Object.keys(groups).map(g => el('div', null, el('h2', null, g), el('div', { class: 'list' }, groups[g].map(c => {
         const bDel = el('button', { class: 'btn small ghost' }, '지우기');
@@ -953,7 +961,7 @@ async function viewMasters(tab) {
     return head;
   }
   const list = data.warehouses;
-  head.append(excelBar('warehouses'), isStaff() ? el('div', { class: 'actions' }, el('a', { class: 'btn primary', href: '#/warehouse/new' }, '창고 등록')) : null,
+  appendKids(head, excelBar('warehouses'), isStaff() ? el('div', { class: 'actions' }, el('a', { class: 'btn primary', href: '#/warehouse/new' }, '창고 등록')) : null,
     el('div', { class: 'list' }, list.length ? list.map(w => el('a', { class: 'row', href: '#/warehouse/' + encodeURIComponent(w.id) },
       el('div', { class: 'main' }, el('div', { class: 't' }, w.이름), el('div', { class: 's' }, w.id + ' · ' + w.유형 + ' · ' + (w.보관조건 || '보관조건 미정'))), el('span', { class: 'tag' }, w.상태)))
       : el('div', { class: 'empty' }, '등록된 창고가 없습니다. 3PL 센터와 샘플실을 등록하세요.')));
@@ -1038,7 +1046,7 @@ function viewMore() {
       isStaff() ? item('#/settings', '회사 정보·선택 목록·계약서 로고', '계약서에 들어가는 우리 회사 정보와 키값 목록') : null),
     el('h2', null, '2단계에서 열리는 메뉴'),
     el('div', { class: 'list' }, ['주문관리', '매입관리', '비용관리', '매출관리', '정산관리', '손익관리'].map(t => el('div', { class: 'row' }, el('div', { class: 'main' }, el('div', { class: 't', style: 'color:var(--muted)' }, t)), el('span', { class: 'tag' }, '12월 이후')))),
-    el('p', { class: 'lead', style: 'margin-top:16px' }, '화프스 v2.3 · ' + S.user.id + ' (' + S.user.role + ')'));
+    el('p', { class: 'lead', style: 'margin-top:16px' }, '화프스 v2.3.1 · ' + S.user.id + ' (' + S.user.role + ')'));
 }
 async function viewNotices() {
   const list = (await ensureData()).notices;
