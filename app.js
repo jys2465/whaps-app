@@ -1,4 +1,4 @@
-/* 화프스(WHAPS) 화면 v2.2 — 데이터는 모두 서버(Apps Script)를 거칩니다. 화면에는 비밀을 두지 않습니다. */
+/* 화프스(WHAPS) 화면 v2.3 — 데이터는 모두 서버(Apps Script)를 거칩니다. 화면에는 비밀을 두지 않습니다. */
 'use strict';
 
 const S = { token: null, user: null, settings: {}, data: null, detail: {}, wide: false, flash: null };
@@ -73,16 +73,47 @@ function tagFor(state) {
   return el('span', { class: 'tag ' + cls }, state);
 }
 
+/* ───────── 대기 표시(모래시계) ───────── */
+const BUSY_MSG = { login: '로그인 중입니다', bootstrap: '자료를 불러오는 중입니다', 'contract.confirm': '계약서 PDF를 만드는 중입니다 (10초 안팎)',
+  'attach.upload': '파일을 올리는 중입니다', 'file.get': '파일을 여는 중입니다', 'auth.changePassword': '비밀번호를 바꾸는 중입니다' };
+let busyN = 0, busyTimer = null;
+function busyEl() {
+  let b = document.getElementById('busy');
+  if (!b) {
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('viewBox', '0 0 24 24'); svg.setAttribute('class', 'hourglass'); svg.setAttribute('aria-hidden', 'true');
+    const p = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    p.setAttribute('d', 'M6 2h12M6 22h12M7 2v4a5 5 0 0 0 2.5 4.3L12 12l2.5 1.7A5 5 0 0 1 17 18v4M17 2v4a5 5 0 0 1-2.5 4.3L12 12l-2.5 1.7A5 5 0 0 0 7 18v4M9.5 19h5');
+    svg.appendChild(p);
+    b = el('div', { id: 'busy', role: 'status', 'aria-live': 'polite' }, el('div', { class: 'busy-card' }, svg, el('div', { id: 'busy-msg' })));
+    document.body.appendChild(b);
+  }
+  return b;
+}
+function busyStart(msg) {
+  busyN++;
+  busyEl();
+  $('#busy-msg').textContent = msg;
+  clearTimeout(busyTimer);
+  busyTimer = setTimeout(() => { if (busyN > 0) $('#busy').classList.add('on'); }, 250);
+}
+function busyEnd() {
+  busyN = Math.max(0, busyN - 1);
+  if (!busyN) { clearTimeout(busyTimer); const b = $('#busy'); if (b) b.classList.remove('on'); }
+}
+
 /* ───────── 서버 호출 ───────── */
 class ApiError extends Error { constructor(msg, code) { super(msg); this.code = code; } }
-async function api(action, payload) {
+async function api(action, payload, opts) {
+  const silent = opts && opts.silent;
   const body = JSON.stringify({ action: action, payload: payload || {}, token: S.token });
   const bar = $('#progress');
-  if (bar) bar.classList.add('on');
+  if (bar && !silent) bar.classList.add('on');
+  if (!silent) busyStart(BUSY_MSG[action] || (/\.(list|get)$/.test(action) || action === 'auth.me' ? '불러오는 중입니다' : '저장하는 중입니다'));
   let j;
   try {
     if (window.__WHAPS_TEST_HANDLER__) {
-      j = JSON.parse(window.__WHAPS_TEST_HANDLER__(body));
+      j = JSON.parse(await Promise.resolve(window.__WHAPS_TEST_HANDLER__(body)));
     } else {
       const url = (window.WHAPS_CONFIG || {}).API_URL || '';
       if (!/^https:\/\/script\.google\.com\//.test(url)) throw new ApiError('config.js에 Apps Script 웹앱 주소를 넣어 주세요.', 'config');
@@ -93,7 +124,8 @@ async function api(action, payload) {
     if (e instanceof ApiError) throw e;
     throw new ApiError('서버에 연결하지 못했습니다. 인터넷 연결과 웹앱 주소를 확인하세요.', 'network');
   } finally {
-    if (bar) bar.classList.remove('on');
+    if (bar && !silent) bar.classList.remove('on');
+    if (!silent) busyEnd();
   }
   if (!j.ok) {
     if (j.code === 'auth') { clearSession(); setTimeout(() => viewLogin(j.msg), 0); }
@@ -105,21 +137,25 @@ async function api(action, payload) {
 // 앱을 열 때 목록을 한 번에 받아 두고(bootstrap), 화면 전환은 기억해 둔 데이터로 즉시 그립니다.
 const LISTS = { vendors: 'vendors', categories: 'categories', warehouses: 'warehouses', products: 'products', contracts: 'contracts', notices: 'notices' };
 function persistData() { try { sessionStorage.setItem('whaps_data', JSON.stringify(S.data)); } catch (e) { /* 용량 초과 시 무시 */ } }
-async function loadAll() {
-  const d = await api('bootstrap');
-  S.user = d.user; S.settings = d.settings;
-  S.data = { vendors: d.vendors, categories: d.categories, warehouses: d.warehouses, products: d.products, contracts: d.contracts, notices: d.notices, dashboard: d.dashboard, at: d.at, _t: Date.now() };
+function applyData(d) {
+  if (d.user) S.user = d.user;
+  S.settings = d.settings;
+  S.data = { vendors: d.vendors, categories: d.categories, warehouses: d.warehouses, products: d.products, contracts: d.contracts, notices: d.notices,
+    dashboard: d.dashboard, choices: d.choices || [], details: d.details || {}, at: d.at, _t: Date.now() };
   saveUser(); persistData();
   autoLogo();
   return S.data;
+}
+async function loadAll(silent) {
+  return applyData(await api('bootstrap', {}, { silent: !!silent }));
 }
 let refreshTimer = null;
 function refreshSoon(rerender) {
   clearTimeout(refreshTimer);
   refreshTimer = setTimeout(async () => {
     try {
-      await loadAll();
-      if (rerender && /^#\/(home|contracts|products|masters|notices)/.test(location.hash || '#/home')) route(true);
+      await loadAll(true);
+      if (rerender && /^#\/(home|contracts|products|masters|notices|contract\/[^/]+$)/.test(location.hash || '#/home')) route(true);
     } catch (e) { /* 다음 기회에 */ }
   }, 1200);
 }
@@ -133,7 +169,7 @@ function upsert(list, row, key) {
 }
 function rememberDetail(d) {
   if (!d || !d.contract) return d;
-  S.detail[d.contract.id] = d;
+  if (S.data) { S.data.details = S.data.details || {}; S.data.details[d.contract.id] = d; }
   const lite = Object.assign({}, d.contract); delete lite.키값JSON;
   upsert('contracts', lite);
   return d;
@@ -146,16 +182,16 @@ function clearSession() { S.token = null; S.user = null; S.data = null; S.detail
 function saveUser() { sessionStorage.setItem('whaps', JSON.stringify({ token: S.token, user: S.user, settings: S.settings })); }
 // 계약서 바닥글 로고가 없으면 화프스 로고(gcw1.png)를 자동으로 등록합니다(운영기획·관리자).
 let logoTried = false;
-async function registerLogo(blob, name) {
+async function registerLogo(blob, name, silent) {
   const dataUrl = await new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result)); r.onerror = rej; r.readAsDataURL(blob); });
   const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = dataUrl; });
-  S.settings = await api('settings.logo', { data: dataUrl.split(',')[1], mime: blob.type || 'image/png', ratio: img.naturalHeight / img.naturalWidth, name: name });
+  S.settings = await api('settings.logo', { data: dataUrl.split(',')[1], mime: blob.type || 'image/png', ratio: img.naturalHeight / img.naturalWidth, name: name }, { silent: !!silent });
   saveUser();
 }
 async function autoLogo() {
   if (logoTried || !isStaff() || S.settings.로고파일ID) return;
   logoTried = true;
-  try { const b = await (await fetch('gcw1.png')).blob(); await registerLogo(b, 'gcw1.png'); } catch (e) { /* 설정 화면에서 다시 등록 */ }
+  try { const b = await (await fetch('gcw1.png')).blob(); await registerLogo(b, 'gcw1.png', true); } catch (e) { /* 설정 화면에서 다시 등록 */ }
 }
 
 /* ───────── 계약서 템플릿 ───────── */
@@ -204,14 +240,11 @@ function renderDoc(tpl, values, settings) {
 }
 // 인쇄: A4 쪽을 직접 나눠 그립니다. 여백을 0으로 두어 브라우저가 날짜·제목·주소를 붙이지 않게 하고,
 // 쪽마다 아래 가운데 로고와 오른쪽 아래 쪽 번호를 넣습니다.
-async function printDoc(tpl, values, settings) {
-  const prev = document.getElementById('print-root');
-  if (prev) prev.remove();
-  const root = el('div', { id: 'print-root', 'aria-hidden': 'true' });
-  document.body.appendChild(root);
-  if (document.fonts && document.fonts.ready) await document.fonts.ready;
+let measureHost = null;
+function paginate(tpl, values, settings) {
+  if (!measureHost || !measureHost.isConnected) { measureHost = el('div', { class: 'measure-host', 'aria-hidden': 'true' }); document.body.appendChild(measureHost); }
   const probe = el('section', { class: 'pg' }, el('div', { class: 'pg-body' }));
-  root.appendChild(probe);
+  measureHost.appendChild(probe);
   const box = probe.firstChild;
   const avail = box.getBoundingClientRect().height;
   const nodes = docNodes(tpl, values, settings);
@@ -234,14 +267,43 @@ async function printDoc(tpl, values, settings) {
     used += it.h;
   });
   probe.remove();
-  pages.forEach((list, idx) => root.appendChild(el('section', { class: 'pg' },
+  return pages.map((list, idx) => el('section', { class: 'pg' },
     el('div', { class: 'pg-body' }, list.map(it => it.node)),
     el('img', { class: 'pg-logo', src: 'gcw1.png', alt: '' }),
-    el('div', { class: 'pg-num' }, (idx + 1) + ' / ' + pages.length))));
+    el('div', { class: 'pg-num' }, (idx + 1) + ' / ' + pages.length)));
+}
+// 화면용: 쪽마다 A4 종이처럼 보이고, 화면 폭에 맞춰 축소합니다.
+function fitPages(wrap) {
+  const w = wrap.clientWidth;
+  if (!w) return;
+  wrap.style.setProperty('--z', String(Math.min(1, (w - 4) / 793.7)));
+}
+function renderPaged(tpl, values, settings) {
+  const wrap = el('div', { class: 'pages', 'aria-label': '계약서 미리보기' }, paginate(tpl, values, settings));
+  requestAnimationFrame(() => fitPages(wrap));
+  return wrap;
+}
+window.addEventListener('resize', () => document.querySelectorAll('.pages').forEach(fitPages));
+// 인쇄: 같은 쪽 나누기 결과를 여백 0으로 인쇄(브라우저가 날짜·제목·주소를 붙이지 않음)
+async function printDoc(tpl, values, settings) {
+  const prev = document.getElementById('print-root');
+  if (prev) prev.remove();
+  if (document.fonts && document.fonts.ready) await document.fonts.ready;
+  const root = el('div', { id: 'print-root', 'aria-hidden': 'true' }, paginate(tpl, values, settings));
+  document.body.appendChild(root);
   await Promise.all(Array.from(root.querySelectorAll('img')).map(img => (img.complete ? null : new Promise(r => { img.onload = r; img.onerror = r; }))));
   const cleanup = () => { root.remove(); window.removeEventListener('afterprint', cleanup); };
   window.addEventListener('afterprint', cleanup);
   window.print();
+}
+// 이 계약 종류에서 키별로 고를 수 있는 값 (운영기획이 설정)
+function choicesFor(code) {
+  const m = {};
+  ((S.data && S.data.choices) || []).forEach(c => {
+    if (c.계약종류 && c.계약종류 !== code) return;
+    (m[c.키] = m[c.키] || []).push(c.값);
+  });
+  return m;
 }
 function partyValues(vendor) {
   const masked = s => /\*/.test(String(s || ''));
@@ -277,6 +339,14 @@ function icon(name) {
   svg.appendChild(p);
   return svg;
 }
+function logoutButton() {
+  const b = el('button', { class: 'logout', type: 'button' }, '로그아웃');
+  b.onclick = async () => {
+    try { await api('auth.logout', {}, { silent: true }); } catch (e) { /* 이미 만료 */ }
+    clearSession(); history.replaceState(null, '', location.pathname); viewLogin('로그아웃했습니다.');
+  };
+  return b;
+}
 function renderShell() {
   const nav = el('nav', { class: 'tabs', 'aria-label': '주 메뉴' },
     [['#/home', 'home', '홈'], ['#/contracts', 'contract', '계약'], ['#/products', 'product', '상품'], ['#/masters/vendors', 'master', '마스터'], ['#/more', 'more', '더보기']]
@@ -284,7 +354,7 @@ function renderShell() {
   $('#root').replaceChildren(
     el('div', { class: 'progress', id: 'progress' }),
     el('header', { class: 'bar' }, el('img', { src: 'wp1.png', alt: 'WP' }), el('span', { class: 'name' }, '화프스'),
-      el('span', { class: 'who' }, S.user.name, el('br'), S.user.role)),
+      el('span', { class: 'who' }, S.user.name, el('br'), S.user.role), logoutButton()),
     el('main', { id: 'main' }), nav);
   route();
 }
@@ -358,7 +428,7 @@ function viewLogin(msg) {
         try {
           const d = await api('login', { id: id.value.trim(), password: pw.value });
           setSession(d);
-          if (!d.user.mustChange) await loadAll();
+          if (!d.user.mustChange) { if (d.data) applyData(d.data); else await loadAll(); }
           location.hash = d.user.mustChange ? '#/password' : '#/home';
           renderShell();
         } catch (x) { err.textContent = x.message; }
@@ -516,21 +586,15 @@ async function viewContracts(state) {
 }
 
 async function getDetail(id, fresh) {
-  if (!fresh && S.detail[id]) return S.detail[id];
+  const cached = S.data && S.data.details && S.data.details[id];
+  if (!fresh && cached) return cached;
   return rememberDetail(await api('contract.get', { id: id }));
-}
-function refreshDetail(id) {
-  api('contract.get', { id: id }).then(d => {
-    const before = JSON.stringify(S.detail[id]);
-    rememberDetail(d);
-    if (before !== JSON.stringify(d) && location.hash.replace('/edit', '') === '#/contract/' + encodeURIComponent(id)) route(true);
-  }).catch(() => {});
 }
 
 async function viewContractEdit(id) {
   if (!canEdit()) throw new Error('조회 권한으로는 계약을 작성할 수 없습니다.');
   const vendors = (await ensureData()).vendors;
-  const got = id ? await getDetail(id, true) : null;
+  const got = id ? await getDetail(id, false) : null;
   if (got && got.contract.상태 !== '작성중') { location.hash = '#/contract/' + encodeURIComponent(id); return null; }
   S.wide = true;
   let curId = got ? got.contract.id : null;
@@ -556,7 +620,18 @@ async function viewContractEdit(id) {
     tpl().keys.forEach(k => { if (pv[k]) values[k] = pv[k]; });
   }
   function buildFields() {
+    const ch = choicesFor(code);
     fieldsBox.replaceChildren(...tpl().keys.map(k => {
+      if (ch[k] && ch[k].length === 1) {           // 운영기획이 정한 고정값
+        values[k] = ch[k][0];
+        return el('label', { class: 'field auto' }, el('span', null, keyLabel(k)), el('input', { value: ch[k][0], readOnly: true, 'aria-label': keyLabel(k) }), el('small', null, '이 계약 종류는 이 값으로 정해져 있습니다'));
+      }
+      if (ch[k]) {                                  // 목록에서만 선택(직접 입력 불가)
+        if (values[k] && !ch[k].includes(values[k])) values[k] = '';
+        const sel = select([['', '선택하세요']].concat(ch[k].map(v => [v, v])), values[k] || '');
+        sel.addEventListener('change', () => { values[k] = sel.value; refresh(); });
+        return el('label', { class: 'field' }, el('span', null, keyLabel(k)), sel, el('small', null, '운영기획이 정한 목록에서 고릅니다'));
+      }
       if (k === '특약사항') {
         const ta = el('textarea', { value: values[k] || '', rows: 5, placeholder: '예) 1. 첫 납품분은 7일 안에 정산한다.\n2. 시식 행사 비용은 공급하는 자가 부담한다.' });
         ta.addEventListener('input', () => { values[k] = ta.value; refresh(); });
@@ -571,8 +646,10 @@ async function viewContractEdit(id) {
         isPartyKey(k) ? el('small', null, '벤더를 고르면 자동으로 채워집니다') : null);
     }));
   }
+  let pageTimer = null;
   function refresh() {
-    preview.replaceChildren(renderDoc(tpl(), values, S.settings));
+    clearTimeout(pageTimer);
+    pageTimer = setTimeout(() => preview.replaceChildren(renderPaged(tpl(), values, S.settings)), 150);
     const empty = tpl().keys.filter(k => !optional().includes(k) && !values[k]).length;
     status.textContent = empty ? '빈 칸 ' + empty + '개 — 미리보기에 노란색으로 표시됩니다. 해당 없으면 "해당없음"을 누르세요.' : '모든 칸이 채워졌습니다. 계약일은 서명할 때 양쪽이 직접 적습니다.';
     status.className = 'note' + (empty ? ' warn' : '');
@@ -583,6 +660,7 @@ async function viewContractEdit(id) {
     const d = await api('contract.saveDraft', { id: curId, 종류: code, 벤더코드: vendorId, values: pick() });
     curId = d.id;
     upsert('contracts', d);
+    rememberDetail({ contract: d, values: pick(), attachments: [], checklist: [] });
     history.replaceState(null, '', '#/contract/' + encodeURIComponent(d.id) + '/edit');
     return d;
   }
@@ -611,6 +689,7 @@ async function viewContractEdit(id) {
   });
   buildFields();
   refresh();
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(refresh);
   return el('div', null,
     el('h1', null, curId ? '계약 작성 · ' + curId : '새 계약'),
     el('div', { class: 'split' },
@@ -623,9 +702,7 @@ async function viewContractEdit(id) {
 }
 
 async function viewContract(id) {
-  const cachedDetail = S.detail[id];
   const d = await getDetail(id, false);
-  if (cachedDetail) refreshDetail(id);
   const c = d.contract;
   if (c.상태 === '작성중') { location.hash = '#/contract/' + encodeURIComponent(c.id) + '/edit'; return null; }
   const tpl = CONTRACT_TEMPLATES[c.종류];
@@ -650,8 +727,7 @@ async function viewContract(id) {
     });
     return el('span', null, b, inp);
   }
-  const today = new Date(Date.now() + 9 * 3600000).toISOString().slice(0, 10);
-  const signDate = el('input', { type: 'date', max: today, min: String(c.확정일시 || '').slice(0, 10), 'aria-label': '계약 체결일' });
+  const signDate = el('input', { type: 'date', 'aria-label': '계약 체결일' });
   const needDate = () => { if (!signDate.value) throw new Error('먼저 계약 체결일(두 당사자 중 늦게 서명한 날짜)을 고르세요.'); };
   const canUpload = isStaff() && ['서명대기', '증빙수집', '완료'].includes(c.상태);
   const allOk = d.checklist.every(x => x.상태 === '확인');
@@ -714,7 +790,14 @@ async function viewContract(id) {
     isStaff() && ['서명대기', '증빙수집'].includes(c.상태) ? el('div', { class: 'actions' }, bDone,
       allOk ? null : el('span', { class: 'note' }, '서명본·사업자등록증·통장사본을 모두 확인하면 누를 수 있습니다.')) : null,
     el('h2', null, '계약서 내용'),
-    el('details', null, el('summary', null, '펼쳐 보기'), renderDoc(tpl, d.values, S.settings)));
+    (() => {
+      const det = el('details', null, el('summary', null, '펼쳐 보기'));
+      det.addEventListener('toggle', () => {
+        if (det.open && !det.querySelector('.pages')) det.appendChild(renderPaged(tpl, d.values, S.settings));
+        det.querySelectorAll('.pages').forEach(fitPages);
+      });
+      return det;
+    })());
 }
 
 async function openFile(fileId) {
@@ -947,18 +1030,15 @@ async function viewWarehouseEdit(id) {
 /* ───────── 더보기 · 공지 · 사용자 · 감사로그 · 설정 ───────── */
 function viewMore() {
   const item = (href, t, sub) => el('a', { class: 'row', href: href }, el('div', { class: 'main' }, el('div', { class: 't' }, t), sub ? el('div', { class: 's' }, sub) : null));
-  const bOut = el('button', { class: 'row' }, el('div', { class: 'main' }, el('div', { class: 't' }, '로그아웃')));
-  bOut.onclick = async () => { try { await api('auth.logout'); } catch (e) { /* 이미 만료 */ } clearSession(); location.hash = ''; viewLogin('로그아웃했습니다.'); };
   const bReload = el('button', { class: 'row' }, el('div', { class: 'main' }, el('div', { class: 't' }, '최신 자료 다시 받기'), el('div', { class: 's' }, '다른 사람이 바꾼 내용을 바로 보고 싶을 때')));
-  bReload.onclick = () => act(bReload, async () => { await loadAll(); toast('최신 자료를 받았습니다.'); });
+  bReload.onclick = () => act(bReload, async () => { await loadAll(false); toast('최신 자료를 받았습니다.'); });
   return el('div', null, el('h1', null, '더보기'),
     el('div', { class: 'list' }, item('#/notices', '공지사항', isStaff() ? '등록·수정·삭제' : '읽기'), item('#/password', '비밀번호 바꾸기'), bReload,
       isAdmin() ? [item('#/users', '사용자 관리', '계정 추가, 역할, 비밀번호 초기화'), item('#/audit', '감사로그', '누가 언제 무엇을 바꿨는지')] : null,
-      isStaff() ? item('#/settings', '회사 정보와 계약서 로고', '계약서에 들어가는 우리 회사 정보') : null,
-      bOut),
+      isStaff() ? item('#/settings', '회사 정보·선택 목록·계약서 로고', '계약서에 들어가는 우리 회사 정보와 키값 목록') : null),
     el('h2', null, '2단계에서 열리는 메뉴'),
     el('div', { class: 'list' }, ['주문관리', '매입관리', '비용관리', '매출관리', '정산관리', '손익관리'].map(t => el('div', { class: 'row' }, el('div', { class: 'main' }, el('div', { class: 't', style: 'color:var(--muted)' }, t)), el('span', { class: 'tag' }, '12월 이후')))),
-    el('p', { class: 'lead', style: 'margin-top:16px' }, '화프스 v2.2 · ' + S.user.id + ' (' + S.user.role + ')'));
+    el('p', { class: 'lead', style: 'margin-top:16px' }, '화프스 v2.3 · ' + S.user.id + ' (' + S.user.role + ')'));
 }
 async function viewNotices() {
   const list = (await ensureData()).notices;
@@ -1034,16 +1114,39 @@ async function viewAudit() {
 }
 async function viewSettings() {
   if (!isStaff()) throw new Error('운영기획·관리자만 볼 수 있습니다.');
-  const me = await api('auth.me');
-  S.settings = me.settings; saveUser();
+  await ensureData();
   const keys = Object.keys(S.settings).filter(k => !k.startsWith('로고'));
+  // 선택 목록(키값을 정해진 값에서만 고르게)
+  const allKeys = Array.from(new Set([].concat(...Object.values(CONTRACT_TEMPLATES).map(t => t.keys)))).filter(k => !/^(공급자|개발사|물류사|제조사)_/.test(k) && k !== '특약사항');
+  const types = [['', '모든 계약']].concat(Object.values(CONTRACT_TEMPLATES).map(t => [t.code, t.code + '. ' + t.name]));
+  const typeName = c => (c ? (CONTRACT_TEMPLATES[c] ? c + '. ' + CONTRACT_TEMPLATES[c].name : c) : '모든 계약');
+  const nk = select(allKeys, '대금지급주기'), nv = el('input', { placeholder: '예) 주간 마감·차주 목요일 지급' }), nt = select(types, ''), no = el('input', { type: 'number', value: '1', min: '1', style: 'max-width:90px' });
+  const bAddCh = el('button', { class: 'btn primary' }, '목록에 추가');
+  bAddCh.onclick = () => act(bAddCh, async () => {
+    S.data.choices = await api('choice.save', { 키: nk.value, 값: nv.value, 계약종류: nt.value, 순서: no.value });
+    persistData(); toast('선택 목록에 추가했습니다.'); route(true);
+  });
+  const groups = {};
+  (S.data.choices || []).forEach(c => { (groups[c.키] = groups[c.키] || []).push(c); });
+  const choiceBox = el('div', null,
+    el('p', { class: 'lead' }, '계약 종류별로 값이 하나뿐이면 그 값으로 고정되고, 여럿이면 그중에서만 고를 수 있습니다(직접 입력 불가). 확정된 계약서에는 영향이 없습니다.'),
+    Object.keys(groups).length ? Object.keys(groups).map(k => el('div', null, el('h2', { style: 'font-size:15px' }, keyLabel(k)), el('div', { class: 'list' }, groups[k].map(c => {
+      const bDel = el('button', { class: 'btn small ghost' }, '지우기');
+      bDel.onclick = () => act(bDel, async () => {
+        if (!confirm('"' + c.값 + '"(' + typeName(c.계약종류) + ')을 목록에서 지울까요?')) return;
+        S.data.choices = await api('choice.save', Object.assign({}, c, { 삭제: true })); persistData(); route(true);
+      });
+      return el('div', { class: 'row' }, el('div', { class: 'main' }, el('div', { class: 't' }, c.값), el('div', { class: 's' }, typeName(c.계약종류) + ' · 순서 ' + c.순서)), bDel);
+    })))) : el('div', { class: 'list' }, el('div', { class: 'empty' }, '등록된 선택 목록이 없습니다.')),
+    el('div', { class: 'form', style: 'margin-top:12px' }, el('div', { class: 'two' }, field('키', nk), field('계약 종류', nt)), field('값', nv), field('순서', no), bAddCh));
   const logoInp = el('input', { type: 'file', accept: 'image/png,image/jpeg', class: 'sr' });
   const bLogo = el('button', { class: 'btn' }, '다른 이미지로 바꾸기');
   bLogo.onclick = () => logoInp.click();
   logoInp.onchange = () => act(bLogo, async () => { const f = logoInp.files[0]; if (!f) return; await registerLogo(f, f.name); toast('계약서 로고를 바꿨습니다.'); route(true); });
   const bDefault = el('button', { class: 'btn' }, '화프스 로고(gcw1.png)로 등록');
   bDefault.onclick = () => act(bDefault, async () => { const b = await (await fetch('gcw1.png')).blob(); await registerLogo(b, 'gcw1.png'); toast('계약서 로고를 등록했습니다.'); route(true); });
-  return el('div', null, el('h1', null, '회사 정보와 계약서 로고'),
+  return el('div', null, el('h1', null, '회사 정보·선택 목록·계약서 로고'),
+    el('h2', null, '키값 선택 목록'), choiceBox,
     el('h2', null, '계약서 바닥글 로고'),
     el('div', { class: 'form' }, el('p', { class: 'note' }, S.settings.로고파일ID ? '등록되어 있습니다. 계약서 PDF 각 페이지 아래 가운데에 들어갑니다(폭 26mm).' : '아직 없습니다. 등록하지 않으면 로고 없이 PDF가 만들어집니다.'),
       el('img', { src: 'gcw1.png', alt: '현재 화면 로고', style: 'max-width:180px' }), el('div', { class: 'actions', style: 'margin:0' }, bDefault, isStaff() ? [bLogo, logoInp] : null)),
