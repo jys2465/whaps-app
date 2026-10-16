@@ -149,7 +149,7 @@ nav.tabs a.on { color: var(--navy); font-weight: 700; }
 .pages { display: grid; gap: 14px; justify-items: center; padding: 4px 0 8px; }
 .pages .pg { zoom: var(--z, 1); box-shadow: 0 1px 3px rgba(22, 35, 63, .18), 0 0 0 1px var(--line); }
 .pg { width: 210mm; height: 297mm; box-sizing: border-box; padding: 20mm 20mm 35mm; position: relative; overflow: hidden;
-  background: #fff; color: #111; font-family: "Noto Sans KR", sans-serif; font-size: 9.5pt; line-height: 1.45; }
+  background: #fff; color: #111; font-family: "Noto Sans KR", sans-serif; font-size: 9.5pt; line-height: 1.7; }  /* 서버 PDF(구글 문서 줄간격 1.0)와 같은 쪽 나눔이 되도록 측정해 맞춘 값 */
 .pg-body { height: 100%; }
 .pg .doc-title { text-align: center; font-size: 16pt; font-weight: 800; color: var(--navy); margin: 0; padding-bottom: 7mm; }
 .pg p { margin: 0; padding-bottom: 1.1mm; }
