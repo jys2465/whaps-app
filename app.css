@@ -193,3 +193,29 @@ nav.tabs a.on { color: var(--navy); font-weight: 700; }
   .pg { break-after: page; }
   .pg:last-child { break-after: auto; }
 }
+
+/* ── v3 ── */
+.paper p.li, .pg p.li { padding-left: 5mm; }
+.pg p.li { padding-bottom: .6mm; }
+.paper table.terms td, .pg table.terms td { font-size: 8.3pt; }
+.sigwrap { display: grid; gap: 6px; }
+.sigpad { width: 100%; max-width: 600px; aspect-ratio: 3 / 1; border: 2px dashed var(--line); border-radius: 10px; background: #fff; touch-action: none; cursor: crosshair; }
+.check { display: flex; gap: 10px; align-items: flex-start; font-size: 15px; line-height: 1.45; padding: 4px 0; }
+.check input { width: 22px; height: 22px; flex: none; margin-top: 1px; }
+.checks { display: flex; flex-wrap: wrap; gap: 4px 18px; margin: 4px 0; }
+.kv { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px 14px; }
+.kv small { display: block; color: var(--muted); font-size: 12px; }
+.kv b { font-size: 14px; word-break: keep-all; overflow-wrap: anywhere; }
+.kv b.bad, .calc b.bad { color: var(--seal); }
+.row.tree.l2 { padding-left: 34px; }
+.row.tree.l3 { padding-left: 58px; }
+.row.tree.l2 .t, .row.tree.l3 .t { font-weight: 600; }
+.row.tree.l1 { background: #F7F8FB; }
+.calc.calc5 { grid-template-columns: repeat(5, 1fr); }
+@media (max-width: 620px) { .calc.calc5 { grid-template-columns: repeat(2, 1fr); } }
+.inline.cats select { flex: 1; min-width: 0; }
+nav.tabs.two a { flex: 1; }
+pre.secret { white-space: pre-wrap; }
+
+/* 알림이 서명 칸·버튼을 가리지 않게(터치는 아래로 통과) */
+#toast, #toast * { pointer-events: none; }
