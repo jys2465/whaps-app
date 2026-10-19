@@ -1,15 +1,24 @@
-/* 화프스(WHAPS) 화면 v3.0 — 데이터는 모두 서버(Apps Script)를 거칩니다. 화면에는 비밀을 두지 않습니다. */
+/* 화프스(WHAPS) 화면 v4.0 — 데이터는 모두 서버(Apps Script)를 거칩니다. 화면에는 비밀을 두지 않습니다. */
 'use strict';
 
 const S = { token: null, user: null, settings: {}, data: null, detail: {}, wide: false, flash: null };
 const STAFF = ['관리자', '운영기획'];
 const CONTRACT_STATES = ['작성중', '서명대기', '증빙수집', '완료', '종료'];
-const PRODUCT_STATES = ['검토중', '판매중', '판매중지'];
 const SHIP_METHODS = ['자사배송', '업체배송'];
+// FORMS_DEFAULT, CONTRACT_KINDS, KEY_META, compileKind, docsKeys, metaOf, PRODUCT_STATES, ORDER_STATES 등은 templates.js에 있습니다.
 const VENDOR_KINDS = ['공급사', 'PB제조사', '물류사', '개발사', '기타'];
-// TRADE_TYPES, CONTRACT_DOCS, CONTRACT_KINDS, KEY_META, kindParts, partsKeys, adCalc, termsTable, fmtComma 는 templates.js에 있습니다.
+// 계약 양식·입력값 정의·상태 목록·계산 함수(compileKind, docsKeys, metaOf, adCalc, termsTable, fmtComma, nextBizDay 등)는 templates.js에 있습니다.
 
 /* ───────── 작은 도구 ───────── */
+// 화면 조각을 바꿔 끼울 때 빈 값(null·false)이 "null" 글자로 찍히지 않게, 목록은 펼쳐서 넣습니다.
+(function () {
+  const rc = Element.prototype.replaceChildren;
+  Element.prototype.replaceChildren = function () {
+    const kids = [].concat.apply([], Array.prototype.slice.call(arguments).map(k => (Array.isArray(k) ? k.flat(Infinity) : [k])))
+      .filter(k => k !== null && k !== undefined && k !== false);
+    return rc.apply(this, kids);
+  };
+})();
 const $ = (sel, root) => (root || document).querySelector(sel);
 function el(tag, attrs, ...kids) {
   const e = document.createElement(tag);
@@ -149,7 +158,8 @@ function applyData(d) {
   if (d.user) S.user = d.user;
   S.settings = d.settings;
   S.data = { vendors: d.vendors, categories: d.categories, warehouses: d.warehouses, products: d.products, contracts: d.contracts, notices: d.notices,
-    dashboard: d.dashboard, choices: d.choices || [], details: d.details || {}, vendor: d.vendor || null, at: d.at, _t: Date.now() };
+    dashboard: d.dashboard, choices: d.choices || [], details: d.details || {}, vendor: d.vendor || null,
+    forms: d.forms || null, purchases: d.purchases || [], settlements: d.settlements || [], expenses: d.expenses || [], at: d.at, _t: Date.now() };
   saveUser(); persistData();
   autoLogo();
   return S.data;
@@ -202,6 +212,73 @@ async function autoLogo() {
   try { const b = await (await fetch('gcw1.png')).blob(); await registerLogo(b, 'gcw1.png', true); } catch (e) { /* 설정 화면에서 다시 등록 */ }
 }
 
+/* ───────── 숫자 칸: 오른쪽 정렬 + 천 단위 쉼표 자동 ───────── */
+function numInput(value, attrs) {
+  const decimal = attrs && attrs.decimal;
+  const i = el('input', Object.assign({ class: 'num', inputmode: decimal ? 'decimal' : 'numeric', autocomplete: 'off', value: fmtComma(value) }, attrs || {}));
+  i.removeAttribute('decimal');
+  i.addEventListener('input', () => {
+    const before = i.value, pos = i.selectionStart || before.length;
+    const digitsLeft = before.slice(0, pos).replace(/[^0-9.-]/g, '').length;
+    let raw = before.replace(decimal ? /[^0-9.-]/g : /[^0-9-]/g, '');
+    if (decimal) { const k = raw.indexOf('.'); if (k >= 0) raw = raw.slice(0, k + 1) + raw.slice(k + 1).replace(/\./g, ''); }
+    const out = raw.endsWith('.') ? fmtComma(raw.slice(0, -1)) + '.' : fmtComma(raw);
+    if (out === before) return;
+    i.value = out;
+    let n = 0, p = 0;
+    while (p < out.length && n < digitsLeft) { if (/[0-9.-]/.test(out[p])) n++; p++; }
+    try { i.setSelectionRange(p, p); } catch (e) { /* 일부 입력 형식은 커서 지정 불가 */ }
+  });
+  return i;
+}
+const numCell = (v, unit) => el('span', { class: 'num' }, v === '' || v === null || v === undefined || isNaN(Number(v)) ? '—' : fmtComma(Math.round(Number(v))) + (unit || ''));
+
+/* ───────── 화면 안내: 진행 단계 + 이 화면에서 할 일 ───────── */
+function guideBox(g) {
+  if (!g) return null;
+  return el('div', { class: 'guide', role: 'note' },
+    g.steps ? el('ol', { class: 'steps' }, g.steps.map((s, i) => el('li', { class: i === g.cur ? 'on' : (i < g.cur ? 'done' : null) }, el('b', null, String(i + 1)), s))) : null,
+    g.desc ? el('p', null, g.desc) : null);
+}
+const FLOW_CONTRACT = ['종류·상대방 고르기', '입력값 채우기', '확정 (PDF)', '서명 (전자·종이)', '증빙 확인', '완료'];
+const FLOW_PRODUCT = ['등록 (판매대기)', '정보·가격 확인', '판매중 (몰 노출)', '판매보류 · 판매종료', '삭제대기 → 삭제'];
+const GUIDES = {
+  home: { desc: '오늘 처리할 계약·서류와 운영 점검 결과를 모아 보여 줍니다. 항목을 누르면 그 화면으로 갑니다.' },
+  contracts: { steps: FLOW_CONTRACT, cur: 0, desc: '도장 모양 상태를 눌러 걸러 봅니다. 새 계약은 "새 계약"에서 시작합니다.' },
+  contractEdit: { steps: FLOW_CONTRACT, cur: 1, desc: '계약 종류와 상대방을 고르면 거래형태에 맞는 조항만 들어간 계약서가 오른쪽에 바로 보입니다. 상대방 정보는 벤더 마스터에서 자동으로 들어가고, 회색 글씨는 입력 예시입니다.' },
+  products: { steps: FLOW_PRODUCT, cur: 0, desc: '상품을 등록하면 "판매대기"로 시작합니다. 운영기획이 정보를 확인하고 "판매중"으로 바꾸면 몰 노출 대상이 됩니다.' },
+  productEdit: { steps: FLOW_PRODUCT, cur: 1, desc: '공급사를 고르면 거래형태가 정해지고, 상품마다 배송방식을 고릅니다. 분류는 대분류 → 중분류 → 소분류 순서로 고르고, 가격을 넣으면 아래 자동 계산이 바로 바뀝니다.' },
+  vendors: { steps: ['벤더 등록', '구분·거래형태 정하기', '담당자·연락처·이메일 넣기', '계약 작성'], cur: 0, desc: '계약 상대는 모두 벤더로 등록합니다. 공급사는 거래형태를, 계약서에 들어갈 담당자·연락처·이메일을 꼭 채우세요.' },
+  vendorEdit: { steps: ['벤더 등록', '구분·거래형태 정하기', '담당자·연락처·이메일 넣기', '계약 작성'], cur: 1, desc: '사업자등록번호는 검증번호까지 확인합니다. 계좌번호는 운영기획·관리자만 전체를 볼 수 있습니다.' },
+  categories: { steps: ['대분류 만들기', '중분류 추가', '소분류 추가', '상품에 연결'], cur: 0, desc: '분류는 3단계 트리입니다. 줄마다 그 분류(하위 포함)에 속한 상품 수를 상태별로 보여 줍니다.' },
+  warehouses: { steps: ['창고 등록', '입고 매입에서 선택'], cur: 0, desc: '3PL 센터·샘플실 등 상품을 두는 곳을 등록합니다. 입고 매입을 등록할 때 고릅니다.' },
+  orders: { steps: ['아임웹에서 주문 엑셀 내려받기', '화프스에 올리기', '칸 이름·상태 맞추기', '미리보기 점검', '저장'], cur: 1, desc: '아임웹 관리자 → 주문 → 엑셀 다운로드로 받은 파일을 그대로 올립니다. 같은 주문을 다시 올리면 덮어써서 상태만 바뀌고 중복되지 않습니다. 고객 이름·연락처·주소는 저장하지 않습니다.' },
+  purchases: { steps: ['입고 등록', '검수 확인', '매입 확정 (운영기획)', '정산에 포함'], cur: 0, desc: '자사배송 직매입 상품이 창고에 들어오면 검수 합격 수량으로 등록합니다. 업체배송 상품은 주문이 구매확정되면 자동으로 매입됩니다.' },
+  settle: { steps: ['구분·기간 고르기', '미리보기', '정산서 만들기', '확정', '지급(입금) 완료'], cur: 0, desc: '정산에 넣은 주문·매입에는 정산번호가 붙어 두 번 정산되지 않습니다. 정산 뒤 취소·반품된 주문은 다음 정산에서 자동으로 빼 줍니다(마이너스).' },
+  pl: { steps: ['연도 고르기', '월별 매출·원가 확인', '비용 넣기', '영업이익 확인'], cur: 1, desc: '구매확정된 주문으로 계산합니다. 인건비·임차료 같은 비용은 아래에서 월별로 넣습니다.' },
+  check: { steps: ['점검 실행', '항목 눌러 고치기', '다시 점검'], cur: 0, desc: '정산·손익이 틀어질 수 있는 빈칸과 불일치를 찾아 줍니다. 빨간 "오류"부터 고치세요.' },
+  forms: { steps: ['양식 고르기', '조항 고치기·추가', '미리보기 확인', '저장 (새 판)'], cur: 0, desc: '계약서 문구를 직접 고치는 곳입니다(관리자). 저장하면 새 판이 되고, 이미 확정된 계약서는 바뀌지 않습니다.' },
+  formEdit: { steps: ['양식 고르기', '조항 고치기·추가', '미리보기 확인', '저장 (새 판)'], cur: 1, desc: '조항마다 적용 조건(거래형태·배송방식)을 정하면 해당 계약에만 들어갑니다. {{이름}}을 쓰면 계약 작성 화면에 입력칸이 생깁니다.' },
+  users: { desc: '계정을 만들면 임시 비밀번호가 한 번만 보입니다. 업체 계정은 계약 화면의 "업체에 전자서명 요청"으로도 만들어집니다.' },
+  audit: { desc: '누가 언제 무엇을 바꿨는지 최근 기록부터 보여 줍니다.' },
+  settings: { desc: '선택 목록, 직인·로고, 회사 정보와 공휴일(지급일 계산용)을 관리합니다.' },
+  notices: { desc: '팀 공지를 올리고 읽습니다.' },
+  more: { desc: '자주 쓰지 않는 메뉴와 설정이 모여 있습니다.' },
+  password: { desc: '영문과 숫자를 섞어 8자 이상으로 정하세요.' }
+};
+
+/* ───────── 엑셀 서식 안내 ───────── */
+function excelHelp(kind) {
+  const cfg = XL[kind];
+  return el('details', { class: 'xlhelp' }, el('summary', null, '엑셀 서식 안내'),
+    el('ul', null,
+      el('li', null, el('b', null, '내려받기: '), '"화프스_' + cfg.title + '_날짜.xlsx" 파일 하나가 내려옵니다. 첫 시트 "' + cfg.title + '"는 1행이 칸 이름이고 2행부터 한 줄에 한 건이며, 둘째 시트 "작성 안내"에 칸별 쓰는 법이 있습니다.'),
+      el('li', null, el('b', null, '올리기: '), '내려받은 파일을 고쳐 그대로 올립니다(.xlsx · .xls · .csv). 1행의 칸 이름은 바꾸지 마세요. id 칸이 비면 새로 등록, 코드가 있으면 그 건을 고칩니다.'),
+      el('li', null, el('b', null, '숫자: '), '금액·수량은 숫자로 내려오고 천 단위 쉼표로 보입니다. 올릴 때는 쉼표가 있어도 됩니다. 바코드처럼 0으로 시작하는 코드는 글자 그대로 둡니다.'),
+      el('li', null, el('b', null, '안전: '), '한 행이라도 틀리면 아무것도 저장하지 않고 틀린 행 번호와 이유를 보여 줍니다.'),
+      el('li', null, el('b', null, '칸: '), cfg.cols.join(' · '))));
+}
+
 /* ───────── 계약서 템플릿 ───────── */
 function fillNodes(text, values, settings) {
   const out = [];
@@ -217,12 +294,12 @@ function fillNodes(text, values, settings) {
   if (last < text.length) out.push(text.slice(last));
   return out;
 }
-// 계약서 블록을 화면 요소로 만듭니다(화면 미리보기와 인쇄가 함께 씀).
-// 계약서 블록을 화면 요소로 만듭니다(화면 미리보기와 인쇄가 함께 씀).
+// 계약서 블록을 화면 요소로 만듭니다(화면 미리보기와 인쇄가 함께 씀). 숫자 칸은 오른쪽 정렬.
 function docNodes(tpl, values, settings) {
+  const td = (content, head, text) => el('td', { class: (head ? 'h' : '') + (!head && isNumCell(text) ? ' num' : '') || null }, content);
   return tpl.blocks.map(b => {
     if (b.t === 'title') return { t: b.t, node: el('h2', { class: 'doc-title' }, fillNodes(b.x, values, settings)) };
-    if (b.t === 'party') {                       // 좌우 같은 항목을 같은 줄에(대표자·도장 자리가 나란히)
+    if (b.t === 'party') {
       const L = b.left.lines, R = b.right.lines;
       const cells = [el('div', { class: 'ttl' }, b.left.title), el('div', { class: 'ttl' }, b.right.title)];
       for (let i = 0; i < Math.max(L.length, R.length); i++) {
@@ -236,44 +313,46 @@ function docNodes(tpl, values, settings) {
     }
     if (b.t === 'table') {
       const tb = el('table');
-      b.rows.forEach(r => tb.appendChild(el('tr', null, r.map(c => el('td', { class: c.h ? 'h' : null }, fillNodes(c.x, values, settings))))));
+      b.rows.forEach(r => tb.appendChild(el('tr', null, r.map(c => {
+        const filled = String(c.x).replace(/\{\{(@?)([^}]+)\}\}/g, (m, at, k) => (at ? settings[k] : values[k]) || '');
+        return td(fillNodes(c.x, values, settings), c.h, filled);
+      }))));
       return { t: b.t, node: tb };
     }
-    if (b.t === 'terms') {                       // 별지 1: 상품 데이터로 만든 거래조건표
+    if (b.t === 'terms') {
       const tt = values._terms || { title: '상품', head: ['상품코드', '상품명'], rows: [] };
       const rows = tt.rows.length ? tt.rows : [['등록된 상품이 없습니다'].concat(tt.head.slice(1).map(() => ''))];
       const tb = el('table', { class: 'terms' }, el('tr', null, tt.head.map(h => el('td', { class: 'h' }, h))),
-        rows.map(r => el('tr', null, r.map(x => el('td', null, el('span', { class: 'fv' }, String(x || '')))))));
+        rows.map(r => el('tr', null, r.map(x => td(el('span', { class: 'fv' }, String(x || '')), false, String(x || ''))))));
       return { t: 'table', node: el('div', null, el('p', { class: 'h' }, tt.title), tb) };
     }
     return { t: b.t, node: el('p', { class: b.t === 'p' ? null : b.t }, fillNodes(b.x, values, settings)) };
   });
 }
-// 여러 문서(기본계약 + 부속서 + 별지)를 문서마다 새 쪽에서 시작하게 나누고, 전체 쪽 번호를 붙입니다.
-function paginateParts(parts, values, settings) {
+// 여러 문서(계약서 + 별지)를 문서마다 새 쪽에서 시작하게 나누고, 전체 쪽 번호를 붙입니다.
+function paginateDocs(docs, values, settings) {
   const pages = [];
-  parts.forEach(code => { const t = CONTRACT_DOCS[code]; if (t) paginate(t, values, settings).forEach(p => pages.push(p)); });
+  docs.forEach(t => paginate(t, values, settings).forEach(p => pages.push(p)));
   pages.forEach((p, i) => { const n = p.querySelector('.pg-num'); if (n) n.textContent = (i + 1) + ' / ' + pages.length; });
   return pages;
 }
-function renderPaged(parts, values, settings) {
-  const wrap = el('div', { class: 'pages', 'aria-label': '계약서 미리보기' }, paginateParts(parts, values, settings));
+function renderPaged(docs, values, settings) {
+  const pages = paginateDocs(docs, values, settings);
+  const wrap = el('div', { class: 'pages', 'aria-label': '계약서 미리보기', 'data-pages': String(pages.length) }, pages);
   requestAnimationFrame(() => fitPages(wrap));
   return wrap;
 }
-// 인쇄: 같은 쪽 나누기 결과를 여백 0으로 인쇄(브라우저가 날짜·제목·주소를 붙이지 않음)
-async function printDoc(parts, values, settings) {
+async function printDoc(docs, values, settings) {
   const prev = document.getElementById('print-root');
   if (prev) prev.remove();
   if (document.fonts && document.fonts.ready) await document.fonts.ready;
-  const root = el('div', { id: 'print-root', 'aria-hidden': 'true' }, paginateParts(parts, values, settings));
+  const root = el('div', { id: 'print-root', 'aria-hidden': 'true' }, paginateDocs(docs, values, settings));
   document.body.appendChild(root);
   await Promise.all(Array.from(root.querySelectorAll('img')).map(img => (img.complete ? null : new Promise(r => { img.onload = r; img.onerror = r; }))));
   const cleanup = () => { root.remove(); window.removeEventListener('afterprint', cleanup); };
   window.addEventListener('afterprint', cleanup);
   window.print();
 }
-// 이 계약 종류·거래형태에서 키별로 고를 수 있는 값 (운영기획이 설정)
 function choicesFor(kind, trade) {
   const m = {};
   ((S.data && S.data.choices) || []).forEach(c => {
@@ -283,30 +362,34 @@ function choicesFor(kind, trade) {
   return m;
 }
 const vendorTrade = v => (v ? (v.구분 === 'PB제조사' ? '직매입' : (v.거래형태 || '')) : '');
-// 상대방 정보(벤더 마스터)로 자동 채우는 값
 function partyValues(vendor) {
   const masked = s => /\*/.test(String(s || ''));
   const m = { 상대_상호: vendor.상호, 상대_사업자등록번호: vendor.사업자등록번호, 상대_주소: vendor.사업장주소, 상대_대표자: vendor.대표자,
-    상대_담당자: vendor.담당자, 상대_연락처: vendor.연락처, 상대_이메일: vendor.이메일 };
+    상대_담당자: vendor.담당자, 상대_연락처: vendor.연락처, 상대_이메일: vendor.이메일, 거래형태: vendorTrade(vendor) };
   const out = {};
   Object.keys(m).forEach(k => { out[k] = m[k] && !masked(m[k]) ? m[k] : ''; });
   return out;
 }
-const keyLabel = k => (KEY_META[k] && KEY_META[k].label) || k.replace(/^@/, '').replace(/_/g, ' ');
+const keyLabel = k => metaOf(k).label || k.replace(/^@/, '').replace(/_/g, ' ');
 // 미리보기용 값: 입력값 + 상대방 정보 + 광고료 계산 + 거래조건표
-function previewValues(kind, vendor, parts, values) {
+function previewValues(vendor, docs, values) {
   const v = Object.assign({}, values);
   if (vendor) Object.assign(v, partyValues(vendor));
-  const keys = partsKeys(parts);
-  keys.forEach(k => { if (KEY_META[k] && KEY_META[k].t === 'won' && v[k]) v[k] = fmtComma(v[k]); });
+  const keys = docsKeys(docs);
+  keys.forEach(k => { if (metaOf(k).t === 'won' && v[k]) v[k] = fmtComma(v[k]); });
   if (keys.includes('광고료_총액')) {
     const r = adCalc(v.광고_시작일, v.광고_종료일, v.광고_일단가);
     v.광고_게재일수 = r ? String(r.days) : '';
     v.광고료_총액 = r && v.광고_일단가 ? fmtComma(r.total) : '';
   }
-  if (parts.includes('S1') && vendor) v._terms = termsTable(vendorTrade(vendor), ((S.data && S.data.products) || []).filter(p => p.공급사코드 === vendor.id), v);
+  if (vendor && docs.some(d => d.blocks.some(b => b.t === 'terms'))) v._terms = termsTable(vendorTrade(vendor), ((S.data && S.data.products) || []).filter(p => p.공급사코드 === vendor.id), v);
   if (keys.includes('거래조건표_번호') && !v.거래조건표_번호) v.거래조건표_번호 = '확정 때 자동';
   return v;
+}
+// 확정된 계약은 확정 때 저장한 양식으로, 작성 중이면 지금 양식으로 문서를 만듭니다.
+function docsOfDetail(d) {
+  const forms = d.values._forms || (S.data && S.data.forms) || FORMS_DEFAULT;
+  return compileKind(d.contract.종류, forms, d.values._ctx || {});
 }
 
 /* ───────── 터치 서명 패드 ───────── */
@@ -375,6 +458,7 @@ const ICONS = {
   contract: 'M6 3h9l4 4v14H6zM15 3v4h4M9 12h7M9 16h5',
   product: 'M3 7.5 12 3l9 4.5v9L12 21l-9-4.5zM3 7.5 12 12l9-4.5M12 12v9',
   master: 'M12 3 2.5 8 12 13l9.5-5zM2.5 12.5 12 17.5l9.5-5M2.5 16.5 12 21.5l9.5-5',
+  ops: 'M4 20V10M10 20V4M16 20v-7M22 20H2',
   more: 'M5 12h.01M12 12h.01M19 12h.01'
 };
 function icon(name) {
@@ -398,7 +482,7 @@ function logoutButton() {
 function renderShell() {
   const tabs = isVendor()
     ? [['#/home', 'contract', '내 계약'], ['#/more', 'more', '더보기']]
-    : [['#/home', 'home', '홈'], ['#/contracts', 'contract', '계약'], ['#/products', 'product', '상품'], ['#/masters/vendors', 'master', '마스터'], ['#/more', 'more', '더보기']];
+    : [['#/home', 'home', '홈'], ['#/contracts', 'contract', '계약'], ['#/products', 'product', '상품'], ['#/ops/orders', 'ops', '운영'], ['#/masters/vendors', 'master', '마스터'], ['#/more', 'more', '더보기']];
   const nav = el('nav', { class: 'tabs' + (isVendor() ? ' two' : ''), 'aria-label': '주 메뉴' }, tabs.map(([h, ic, t]) => el('a', { href: h, 'data-base': h.split('/')[1] }, icon(ic), t)));
   $('#root').replaceChildren(
     el('div', { class: 'progress', id: 'progress' }),
@@ -447,11 +531,11 @@ function viewMore() {
   bReload.onclick = () => act(bReload, async () => { await loadAll(false); toast('최신 자료를 받았습니다.'); });
   return el('div', null, el('h1', null, '더보기'),
     el('div', { class: 'list' }, item('#/notices', '공지사항', isStaff() ? '등록·수정·삭제' : '읽기'), item('#/password', '비밀번호 바꾸기'), bReload,
-      isAdmin() ? [item('#/users', '사용자 관리', '계정 추가, 역할, 업체 계정, 비밀번호 초기화'), item('#/audit', '감사로그', '누가 언제 무엇을 바꿨는지')] : null,
+      isAdmin() ? [item('#/forms', '계약서 양식 관리', '조항 추가·문구 수정·적용 조건 (관리자)'), item('#/users', '사용자 관리', '계정 추가, 역할, 업체 계정, 비밀번호 초기화'), item('#/audit', '감사로그', '누가 언제 무엇을 바꿨는지')] : null,
       isStaff() ? item('#/settings', '회사 정보·선택 목록·로고·직인', '계약서에 들어가는 우리 회사 정보와 키값 목록') : null),
-    el('h2', null, '2단계에서 열리는 메뉴'),
-    el('div', { class: 'list' }, ['주문관리', '매입관리', '비용관리', '매출관리', '정산관리', '손익관리'].map(t => el('div', { class: 'row' }, el('div', { class: 'main' }, el('div', { class: 't', style: 'color:var(--muted)' }, t)), el('span', { class: 'tag' }, '12월 이후')))),
-    el('p', { class: 'lead', style: 'margin-top:16px' }, '화프스 v3.0 · ' + S.user.id + ' (' + S.user.role + ')'));
+    el('h2', null, '운영'),
+    el('div', { class: 'list' }, item('#/ops/orders', '주문', '아임웹 주문 엑셀 올리기·조회'), item('#/ops/purchases', '매입', '자사배송 입고 등록·확정'), isStaff() ? [item('#/ops/settle', '정산', '직매입·위탁판매·광고료'), item('#/ops/pl', '손익', '월별 매출·원가·영업이익'), item('#/ops/check', '데이터 점검', '연동 오류 찾기')] : null),
+    el('p', { class: 'lead', style: 'margin-top:16px' }, '화프스 v4.0 · ' + S.user.id + ' (' + S.user.role + ')'));
 }
 async function viewUsers() {
   if (!isAdmin()) throw new Error('관리자만 볼 수 있습니다.');
@@ -545,26 +629,47 @@ async function viewSettings() {
       return el('label', { class: 'field' }, el('span', null, k.replace(/_/g, ' ')), el('div', { class: 'inline' }, i, isAdmin() ? b : null));
     })));
 }
+const contractGuide = m => { const d = S.data && S.data.details && S.data.details[decodeURIComponent(m[1])]; const st = d && d.contract.상태; return { steps: FLOW_CONTRACT, cur: { 서명대기: 3, 증빙수집: 4, 완료: 5, 종료: 5 }[st] || 2, desc: st === '서명대기' ? '전자서명을 요청하거나 PDF를 출력해 서명받습니다. 종이로 했다면 스캔본을 올리고 늦게 서명한 날짜를 체결일로 넣습니다.' : '서명이 끝나면 필요한 서류를 확인하고 계약 완료로 처리합니다.' }; };
 const ROUTES = [
-  [/^#\/home$/, () => viewHome()],
-  [/^#\/contracts(?:\/([^/]+))?$/, m => viewContracts(m[1] ? decodeURIComponent(m[1]) : '')],
-  [/^#\/contract\/new$/, () => viewContractEdit(null)],
-  [/^#\/contract\/([^/]+)\/edit$/, m => viewContractEdit(decodeURIComponent(m[1]))],
-  [/^#\/contract\/([^/]+)$/, m => viewContract(decodeURIComponent(m[1]))],
-  [/^#\/products$/, () => viewProducts()],
-  [/^#\/product\/([^/]+)$/, m => viewProductEdit(m[1] === 'new' ? null : decodeURIComponent(m[1]))],
-  [/^#\/masters\/(vendors|categories|warehouses)$/, m => viewMasters(m[1])],
-  [/^#\/vendor\/([^/]+)$/, m => viewVendorEdit(m[1] === 'new' ? null : decodeURIComponent(m[1]))],
-  [/^#\/warehouse\/([^/]+)$/, m => viewWarehouseEdit(m[1] === 'new' ? null : decodeURIComponent(m[1]))],
-  [/^#\/more$/, () => viewMore()],
-  [/^#\/notices$/, () => viewNotices()],
-  [/^#\/notice\/([^/]+)\/edit$/, m => viewNoticeEdit(m[1] === 'new' ? null : decodeURIComponent(m[1]))],
+  [/^#\/home$/, () => viewHome(), 'home'],
+  [/^#\/contracts(?:\/([^/]+))?$/, m => viewContracts(m[1] ? decodeURIComponent(m[1]) : ''), 'contracts'],
+  [/^#\/contract\/new$/, () => viewContractEdit(null), 'contractEdit'],
+  [/^#\/contract\/([^/]+)\/edit$/, m => viewContractEdit(decodeURIComponent(m[1])), 'contractEdit'],
+  [/^#\/contract\/([^/]+)$/, m => viewContract(decodeURIComponent(m[1])), m => (isVendor() ? null : contractGuide(m))],
+  [/^#\/products(?:\/([^/]+))?$/, m => viewProducts(m[1] ? decodeURIComponent(m[1]) : ''), 'products'],
+  [/^#\/product\/([^/]+)$/, m => viewProductEdit(m[1] === 'new' ? null : decodeURIComponent(m[1])), 'productEdit'],
+  [/^#\/masters\/(vendors|categories|warehouses)$/, m => viewMasters(m[1]), m => m[1]],
+  [/^#\/vendor\/([^/]+)$/, m => viewVendorEdit(m[1] === 'new' ? null : decodeURIComponent(m[1])), 'vendorEdit'],
+  [/^#\/warehouse\/([^/]+)$/, m => viewWarehouseEdit(m[1] === 'new' ? null : decodeURIComponent(m[1])), 'warehouses'],
+  [/^#\/ops\/?$/, () => { location.hash = '#/ops/orders'; return null; }],
+  [/^#\/ops\/orders$/, () => viewOrders(), 'orders'],
+  [/^#\/ops\/purchases$/, () => viewPurchases(), 'purchases'],
+  [/^#\/ops\/settle$/, () => viewSettle(), 'settle'],
+  [/^#\/ops\/settle\/([^/]+)$/, m => viewSettleOne(decodeURIComponent(m[1]))],
+  [/^#\/ops\/pl$/, () => viewPL(), 'pl'],
+  [/^#\/ops\/check$/, () => viewCheck(), 'check'],
+  [/^#\/forms$/, () => viewForms(), 'forms'],
+  [/^#\/form\/([^/]+)$/, m => viewFormEdit(decodeURIComponent(m[1])), 'formEdit'],
+  [/^#\/more$/, () => viewMore(), 'more'],
+  [/^#\/notices$/, () => viewNotices(), 'notices'],
+  [/^#\/notice\/([^/]+)\/edit$/, m => viewNoticeEdit(m[1] === 'new' ? null : decodeURIComponent(m[1])), 'notices'],
   [/^#\/notice\/([^/]+)$/, m => viewNotice(decodeURIComponent(m[1]))],
-  [/^#\/users$/, () => viewUsers()],
-  [/^#\/audit$/, () => viewAudit()],
-  [/^#\/settings$/, () => viewSettings()],
-  [/^#\/password$/, () => viewPassword()]
+  [/^#\/users$/, () => viewUsers(), 'users'],
+  [/^#\/audit$/, () => viewAudit(), 'audit'],
+  [/^#\/settings$/, () => viewSettings(), 'settings'],
+  [/^#\/password$/, () => viewPassword(), 'password']
 ];
+// 화면 제목 바로 아래에 진행 단계와 안내를 붙입니다.
+function withGuide(node, key, m) {
+  if (!node || !key) return node;
+  const g = typeof key === 'function' ? key(m) : key;
+  const info = typeof g === 'string' ? GUIDES[g] : g;
+  if (!info) return node;
+  const h1 = node.querySelector && node.querySelector('h1');
+  const box = guideBox(info);
+  if (h1 && h1.parentNode) h1.parentNode.insertBefore(box, h1.nextSibling); else node.prepend(box);
+  return node;
+}
 async function route(silent) {
   if (!S.token) return viewLogin();
   const main = $('#main');
@@ -573,15 +678,15 @@ async function route(silent) {
   if (S.user.mustChange && h !== '#/password') { location.hash = '#/password'; return; }
   if (isVendor() && !/^#\/(home|contract\/[^/]+|more|password)$/.test(h)) { location.hash = '#/home'; return; }
   const base = h.split('/')[1];
-  const alias = { contract: 'contracts', product: 'products', vendor: 'masters', warehouse: 'masters', notices: 'more', notice: 'more', users: 'more', audit: 'more', settings: 'more', password: 'more' };
+  const alias = { contract: 'contracts', product: 'products', vendor: 'masters', warehouse: 'masters', notices: 'more', notice: 'more', users: 'more', audit: 'more', settings: 'more', password: 'more', forms: 'more', form: 'more' };
   document.querySelectorAll('nav.tabs a').forEach(a => a.classList.toggle('on', a.dataset.base === (alias[base] || base)));
-  for (const [re, fn] of ROUTES) {
+  for (const [re, fn, gk] of ROUTES) {
     const m = h.match(re);
     if (!m) continue;
     S.wide = false;
     const slow = silent === true ? null : setTimeout(() => main.replaceChildren(el('div', { class: 'empty' }, '불러오는 중…')), 200);
     try {
-      const node = await fn(m);
+      const node = withGuide(await fn(m), gk, m);
       clearTimeout(slow);
       if (location.hash !== h && location.hash) return;
       main.className = S.wide ? 'wide' : '';
@@ -657,12 +762,12 @@ async function ensureData() {
 const XL = {
   vendors: { title: '벤더', action: 'vendor.import', need: '상호', cols: ['id', '구분', '거래형태', '상태', '상호', '사업자등록번호', '대표자', '사업장주소', '업태', '종목', '담당자', '연락처', '이메일', '거래경로', '은행', '계좌번호', '예금주', '메모'],
     guide: { id: '비우면 새로 등록, 기존 코드(V0001)를 넣으면 수정', 구분: VENDOR_KINDS.join(' / '), 거래형태: '구분이 공급사일 때: ' + TRADE_TYPES.join(' / '), 상태: '후보 / 계약중 / 중단', 상호: '필수', 사업자등록번호: '10자리, 검증번호 확인', 담당자: '계약서 통지 담당자(필수)', 연락처: '계약서 통지 연락처(필수)', 이메일: '계약서 통지 전자우편(필수)' } },
-  categories: { title: '분류', action: 'category.import', need: '대분류', cols: ['id', '단계', '대분류', '중분류', '소분류', '노출', '순서', '체계버전'],
-    guide: { id: '비우면 대·중·소 경로를 따라 없는 분류를 만듦. 코드(K001)를 넣으면 그 분류의 이름·노출·순서를 고침', 단계: '내려받을 때 참고용(올릴 때는 무시)', 대분류: '필수', 중분류: '중분류를 만들 때', 소분류: '소분류를 만들 때', 노출: 'Y / N', 순서: '같은 단계 안의 순서(숫자)', 체계버전: '9+1 / v3 등' } },
+  categories: { title: '분류', action: 'category.import', need: '대분류', nums: ['순서'], cols: ['id', '단계', '대분류', '중분류', '소분류', '노출', '순서'],
+    guide: { id: '비우면 대·중·소 경로를 따라 없는 분류를 만듦. 코드(K001)를 넣으면 그 분류의 이름·노출·순서를 고침', 단계: '내려받을 때 참고용(올릴 때는 무시)', 대분류: '필수', 중분류: '중분류를 만들 때', 소분류: '소분류를 만들 때', 노출: 'Y / N', 순서: '같은 단계 안의 순서(숫자)' } },
   warehouses: { title: '창고', action: 'warehouse.import', need: '이름', cols: ['id', '이름', '유형', '보관조건', '주소', '담당자', '상태'],
     guide: { id: '비우면 새로 등록, W01 같은 코드를 넣으면 수정', 이름: '필수', 유형: '3PL센터 / 샘플실 / 사무실 보관 / 기타', 상태: '사용 / 중지' } },
-  products: { title: '상품', action: 'product.import', need: '상품명', cols: ['id', '상태', '상품명', '공급사코드', '브랜드구분', '분류ID', '대분류', '중분류', '소분류', '배송방식', '규격', '납품단위', '판매단위', '바코드', '박스코드', '박스입수', '소비기한', '보관', '과세구분', '공급가', '수수료율', '일반회원가', '구독회원가', '제조원', '거래조건', '배송비부담', '연결주소', '회원혜택', '메모'],
-    guide: { id: '비우면 새로 등록, P0001 같은 코드를 넣으면 수정', 상태: PRODUCT_STATES.join(' / '), 상품명: '필수', 공급사코드: '벤더 코드(V0001). 거래형태는 공급사에서 자동', 브랜드구분: 'NB / PB', 분류ID: '분류 코드(K001). 비우면 대·중·소 이름으로 찾음', 배송방식: SHIP_METHODS.join(' / ') + ' (직매입·위탁판매만)', 보관: '상온 / 냉장 / 냉동', 과세구분: '과세 / 면세', 공급가: '숫자, VAT 별도 (직매입)', 수수료율: '% 숫자 (위탁판매)', 바코드: '숫자 그대로(앞자리 0 유지)', 연결주소: '제휴입점 상품의 판매 페이지', 회원혜택: '제휴입점 회원 전용 혜택' } }
+  products: { title: '상품', action: 'product.import', need: '상품명', nums: ['박스입수', '공급가', '수수료율', '일반회원가', '구독회원가'], cols: ['id', '상태', '상품명', '공급사코드', '몰상품코드', '브랜드구분', '분류ID', '대분류', '중분류', '소분류', '배송방식', '규격', '납품단위', '판매단위', '바코드', '박스코드', '박스입수', '소비기한', '보관', '과세구분', '공급가', '수수료율', '일반회원가', '구독회원가', '제조원', '거래조건', '배송비부담', '연결주소', '회원혜택', '메모'],
+    guide: { id: '비우면 새로 등록, P0001 같은 코드를 넣으면 수정', 상태: PRODUCT_STATES.join(' / ') + ' (MD는 판매대기·삭제대기만)', 상품명: '필수', 몰상품코드: '아임웹 자체상품코드(주문 연결에 씀, 상품마다 달라야 함)', 공급사코드: '벤더 코드(V0001). 거래형태는 공급사에서 자동', 브랜드구분: 'NB / PB', 분류ID: '분류 코드(K001). 비우면 대·중·소 이름으로 찾음', 배송방식: SHIP_METHODS.join(' / ') + ' (직매입·위탁판매만)', 보관: '상온 / 냉장 / 냉동', 과세구분: '과세 / 면세', 공급가: '숫자, VAT 별도 (직매입)', 수수료율: '% 숫자 (위탁판매)', 바코드: '숫자 그대로(앞자리 0 유지)', 연결주소: '제휴입점 상품의 판매 페이지', 회원혜택: '제휴입점 회원 전용 혜택' } }
 };
 function catTree() {
   const nodes = (S.data.categories || []).slice().sort((a, b) => (num(a.순서) - num(b.순서)) || String(a.이름).localeCompare(String(b.이름)));
@@ -674,29 +779,36 @@ function exportRows(kind) {
   if (kind !== 'categories') return S.data[kind] || [];
   const t = catTree();
   const out = [];
-  const walk = pid => t.kids(pid).forEach(n => { const p = t.path(n.id); out.push({ id: n.id, 단계: n.단계, 대분류: p[0] || '', 중분류: p[1] || '', 소분류: p[2] || '', 노출: n.노출, 순서: n.순서, 체계버전: n.체계버전 }); walk(n.id); });
+  const walk = pid => t.kids(pid).forEach(n => { const p = t.path(n.id); out.push({ id: n.id, 단계: n.단계, 대분류: p[0] || '', 중분류: p[1] || '', 소분류: p[2] || '', 노출: n.노출, 순서: n.순서 }); walk(n.id); });
   walk('');
   return out;
 }
 
 /* ───────── 상품 ───────── */
-async function viewProducts() {
+async function viewProducts(state) {
   const data = await ensureData();
-  const list = data.products;
+  const all = data.products;
   const vname = id => { const v = data.vendors.find(x => x.id === id); return v ? v.상호 : '공급사 미정'; };
-  const q = el('input', { type: 'search', placeholder: '상품명·코드·바코드 검색', 'aria-label': '상품 검색' });
+  const cnt = st => all.filter(p => p.상태 === st).length;
+  const cur = state && PRODUCT_STATES.includes(state) ? state : '';
+  const list = all.filter(p => (cur ? p.상태 === cur : p.상태 !== '삭제'));
+  const q = el('input', { type: 'search', placeholder: '상품명·코드·몰상품코드·바코드 검색', 'aria-label': '상품 검색' });
   const box = el('div', { class: 'list' });
   const draw = () => {
     const sq = q.value.trim();
-    const rows = list.filter(p => !sq || (p.상품명 + p.id + (p.바코드 || '')).includes(sq));
+    const rows = list.filter(p => !sq || (p.상품명 + p.id + (p.몰상품코드 || '') + (p.바코드 || '')).includes(sq));
     box.replaceChildren(...(rows.length ? rows.map(p => el('a', { class: 'row', href: '#/product/' + encodeURIComponent(p.id) },
-      el('div', { class: 'main' }, el('div', { class: 't' }, p.상품명), el('div', { class: 's' }, p.id + ' · ' + vname(p.공급사코드) + ' · ' + (p.거래형태 || '거래형태 미정') + (p.배송방식 ? ' · ' + p.배송방식 : '') + ' · 일반가 ' + won(num(p.일반회원가)))),
-      el('span', { class: 'tag' + (p.상태 === '판매중' ? ' ok' : '') }, p.상태)))
-      : [el('div', { class: 'empty' }, list.length ? '검색 결과가 없습니다.' : '아직 등록된 상품이 없습니다.')]));
+      el('div', { class: 'main' }, el('div', { class: 't' }, p.상품명), el('div', { class: 's' }, p.id + (p.몰상품코드 ? ' · ' + p.몰상품코드 : '') + ' · ' + vname(p.공급사코드) + ' · ' + (p.거래형태 || '거래형태 미정') + (p.배송방식 ? ' · ' + p.배송방식 : ''))),
+      el('div', { class: 'amt' }, el('small', null, '일반가'), numCell(p.일반회원가, '원')),
+      el('span', { class: 'tag' + (p.상태 === '판매중' ? ' ok' : (['삭제대기', '삭제', '판매종료'].includes(p.상태) ? ' no' : '')) }, p.상태)))
+      : [el('div', { class: 'empty' }, all.length ? '해당하는 상품이 없습니다.' : '아직 등록된 상품이 없습니다.')]));
   };
   q.addEventListener('input', draw);
   draw();
-  return el('div', null, el('h1', null, '상품'), el('p', { class: 'lead' }, '판매중·판매중지 상태는 운영기획·관리자가 정합니다. 거래형태는 공급사에서 정해지고, 상품마다 배송방식을 고릅니다.'),
+  const chip = (st, label, n) => el('a', { class: 'chip' + (st === cur ? ' on' : ''), href: '#/products' + (st ? '/' + encodeURIComponent(st) : ''), title: st ? PRODUCT_STATE_INFO[st] : '삭제를 뺀 전체' }, label + ' ' + n);
+  return el('div', null, el('h1', null, '상품'),
+    el('div', { class: 'chips' }, chip('', '전체', all.filter(p => p.상태 !== '삭제').length), PRODUCT_STATES.map(st => chip(st, st, cnt(st)))),
+    cur ? el('p', { class: 'lead' }, cur + ': ' + PRODUCT_STATE_INFO[cur]) : null,
     el('div', { class: 'form', style: 'padding:10px' }, q), excelBar('products'),
     canEdit() ? el('div', { class: 'actions' }, el('a', { class: 'btn primary', href: '#/product/new' }, '상품 등록')) : null, box);
 }
@@ -722,12 +834,13 @@ function calcProduct(p, trade) {
 }
 async function viewProductEdit(id) {
   const data = await ensureData();
-  const p = id ? data.products.find(x => x.id === id) : { 상태: '검토중', 과세구분: '과세', 보관: '상온', 브랜드구분: 'NB', 배송방식: '자사배송' };
+  const p = id ? data.products.find(x => x.id === id) : { 상태: '판매대기', 과세구분: '과세', 보관: '상온', 브랜드구분: 'NB', 배송방식: '자사배송' };
   if (!p) throw new Error('상품을 찾을 수 없습니다: ' + id);
-  const ro = !canEdit() || (id && p.상태 !== '검토중' && !isStaff());
+  const ro = !canEdit() || (id && p.상태 !== '판매대기' && !isStaff());
   const f = {};
   const inp = (k, attrs) => (f[k] = el('input', Object.assign({ value: p[k] || '' }, attrs || {})));
   const sel = (k, opts) => (f[k] = select(opts, p[k] || (Array.isArray(opts[0]) ? opts[0][0] : opts[0])));
+  const numf = (k, attrs) => (f[k] = numInput(p[k] || '', attrs || {}));
   const suppliers = data.vendors.filter(v => v.구분 === '공급사' || v.구분 === 'PB제조사');
   sel('공급사코드', [['', '선택 안 함']].concat(suppliers.map(v => [v.id, v.상호 + ' (' + v.id + ' · ' + (vendorTrade(v) || '거래형태 미정') + ')'])));
   const tradeOf = () => vendorTrade(data.vendors.find(v => v.id === f.공급사코드.value));
@@ -750,8 +863,8 @@ async function viewProductEdit(id) {
   const calcBox = el('div', { class: 'calc calc5' });
   const tradeLine = el('p', { class: 'lead', style: 'margin:0' });
   const shipField = field('배송방식', sel('배송방식', SHIP_METHODS), '자사배송: 우리 창고에서 출고 · 업체배송: 공급사가 고객에게 직배송');
-  const costField = field('공급가 (VAT 별도)', inp('공급가', { inputmode: 'numeric' }), '직매입');
-  const feeField = field('수수료율 (%)', inp('수수료율', { inputmode: 'decimal' }), '위탁판매 · 결제금액 기준');
+  const costField = field('공급가 (원, VAT 별도)', numf('공급가'), '직매입');
+  const feeField = field('수수료율 (%)', numf('수수료율', { decimal: true }), '위탁판매 · 결제금액 기준');
   const adFields = el('div', { class: 'two' }, field('연결 주소 (판매 페이지)', inp('연결주소', { type: 'url', placeholder: 'https://' })), field('회원 전용 혜택', inp('회원혜택', { placeholder: '예) 회원 쿠폰 10%' })));
   const drawCalc = () => {
     const tr = tradeOf();
@@ -764,7 +877,7 @@ async function viewProductEdit(id) {
     const cur = {}; Object.keys(f).forEach(k => { cur[k] = f[k].value; });
     const r = calcProduct(cur, tr);
     const floor = tr === '위탁판매' ? Number(S.settings.원가보전선_위탁판매 || 0.05) : Number(S.settings.원가보전선_직매입 || 0.1);
-    const cell = (label, val, bad) => el('div', null, el('small', null, label), el('b', { class: bad ? 'bad' : null }, val));
+    const cell = (label, val, bad) => el('div', null, el('small', null, label), el('b', { class: 'num' + (bad ? ' bad' : '') }, val));
     const rowOf = (name, x) => [
       cell(name + '가 세제외', won(x && x.ex)),
       cell(tr === '위탁판매' ? name + '가 수수료율' : name + '가 마진율', pct(x && x.margin), x && x.margin !== null && x.margin < floor),
@@ -775,17 +888,18 @@ async function viewProductEdit(id) {
   };
   const form = el('div', { class: 'form' },
     field('상품명', inp('상품명', { required: true }), '아임웹 노출명 기준'),
-    el('div', { class: 'two' }, field('공급사', f.공급사코드), field('상태', sel('상태', isStaff() ? PRODUCT_STATES : [p.상태 || '검토중']), '검토중 → 판매중 → 판매중지')),
+    el('div', { class: 'two' }, field('공급사', f.공급사코드), field('상태', sel('상태', isStaff() ? PRODUCT_STATES : (p.상태 === '판매대기' || !id ? ['판매대기', '삭제대기'] : [p.상태])), PRODUCT_STATE_INFO[p.상태 || '판매대기'])),
+    field('몰상품코드 (아임웹 자체상품코드)', inp('몰상품코드', { placeholder: '예) IM-10023', autocapitalize: 'off' }), '주문 엑셀을 올릴 때 이 코드로 상품을 찾습니다. 상품마다 달라야 합니다.'),
     tradeLine,
     el('div', { class: 'two' }, shipField, field('브랜드 구분', sel('브랜드구분', ['NB', 'PB']))),
     el('label', { class: 'field' }, el('span', null, '분류 (대 → 중 → 소)'), el('div', { class: 'inline cats' }, cs[0], cs[1], cs[2])),
     el('div', { class: 'two' }, field('규격', inp('규격', { placeholder: '3kg 박스(10개 내외)' })), field('판매단위', inp('판매단위', { placeholder: '1박스' }))),
-    el('div', { class: 'two' }, field('납품단위', inp('납품단위', { placeholder: '10박스' })), field('박스당 입수', inp('박스입수', { inputmode: 'numeric' }))),
+    el('div', { class: 'two' }, field('납품단위', inp('납품단위', { placeholder: '10박스' })), field('박스당 입수', numf('박스입수'))),
     el('div', { class: 'two' }, field('상품 바코드', inp('바코드', { inputmode: 'numeric' })), field('박스 코드', inp('박스코드', { inputmode: 'numeric' }))),
     el('div', { class: 'two' }, field('소비기한', inp('소비기한', { placeholder: '제조일로부터 6개월' })), field('보관', sel('보관', ['상온', '냉장', '냉동']))),
     el('div', { class: 'two' }, field('제조원 (표시사항)', inp('제조원', { placeholder: '예) ○○식품(주)' })), field('과세 구분', sel('과세구분', ['과세', '면세']))),
     el('div', { class: 'two' }, costField, feeField),
-    el('div', { class: 'two' }, field('일반회원가', inp('일반회원가', { inputmode: 'numeric' })), field('구독회원가', inp('구독회원가', { inputmode: 'numeric' }))),
+    el('div', { class: 'two' }, field('일반회원가 (원)', numf('일반회원가')), field('구독회원가 (원)', numf('구독회원가'))),
     el('div', { class: 'two' }, field('발주·출고 조건', inp('거래조건', { placeholder: '예) 최소 20박스, 발주 후 2일 내 납품' }), '별지 1 거래조건표에 들어감'), field('배송비', inp('배송비부담', { placeholder: '비우면 기본값' }), '업체배송은 비우면 공급가에 포함')),
     adFields,
     el('h2', { style: 'margin:6px 0 0' }, '자동 계산'), calcBox,
@@ -802,7 +916,7 @@ async function viewProductEdit(id) {
     location.hash = '#/products';
   });
   return el('div', null, el('h1', null, id ? p.상품명 : '상품 등록'), id ? el('p', { class: 'lead' }, p.id + ' · 마지막 수정 ' + p.수정일시) : null,
-    ro && canEdit() ? el('p', { class: 'note' }, p.상태 + ' 상태의 상품은 운영기획·관리자만 고칠 수 있습니다.') : null,
+    ro && canEdit() ? el('p', { class: 'note' }, p.상태 + ' 상태의 상품은 운영기획·관리자만 고칠 수 있습니다. 삭제가 필요하면 운영기획에 요청하세요.') : null,
     form, ro ? null : el('div', { class: 'actions' }, bSave, el('a', { class: 'btn ghost', href: '#/products' }, '목록으로')));
 }
 
@@ -831,6 +945,8 @@ async function viewMasters(tab) {
   }
   if (tab === 'categories') {
     const t = catTree();
+    const under = id => { const out = [id]; for (let i = 0; i < out.length; i++) t.nodes.forEach(n => { if (n.상위ID === out[i]) out.push(n.id); }); return out; };
+    const counts = id => { const ids = under(id); const c = { 전체: 0 }; PRODUCT_STATES.forEach(st => { c[st] = 0; }); data.products.forEach(x => { if (ids.includes(x.분류ID)) { c[x.상태] = (c[x.상태] || 0) + 1; if (x.상태 !== '삭제') c.전체++; } }); return c; };
     const save = async (payload, msg) => { S.data.categories = await api('category.save', payload); persistData(); toast(msg); route(true); };
     const nodeRow = n => {
       const lv = Number(n.단계);
@@ -841,17 +957,21 @@ async function viewMasters(tab) {
         const h = el('button', { class: 'btn small ghost' }, n.노출 === 'Y' ? '숨기기' : '보이기'); h.onclick = () => act(h, () => save({ id: n.id, 이름: n.이름, 노출: n.노출 === 'Y' ? 'N' : 'Y' }, '바꿨습니다.')); btns.push(h);
         const d = el('button', { class: 'btn small ghost' }, '지우기'); d.onclick = () => act(d, async () => { if (confirm(n.이름 + ' 분류를 지울까요?')) await save({ id: n.id, 삭제: true }, '지웠습니다.'); }); btns.push(d);
       }
-      return el('div', { class: 'row tree l' + lv }, el('div', { class: 'main' }, el('div', { class: 't' }, n.이름), el('div', { class: 's' }, n.id + ' · ' + ['대', '중', '소'][lv - 1] + '분류 · ' + (n.체계버전 || ''))),
+      const c = counts(n.id);
+      return el('div', { class: 'row tree l' + lv }, el('div', { class: 'main' }, el('div', { class: 't' }, n.이름, el('span', { class: 'cnt' }, ' 상품 ' + c.전체)),
+        el('div', { class: 's' }, n.id + ' · ' + ['대', '중', '소'][lv - 1] + '분류'),
+        el('div', { class: 'cnts' }, PRODUCT_STATES.map(st => el('span', { class: c[st] ? 'on' : null, title: PRODUCT_STATE_INFO[st] }, st + ' ' + c[st])))),
         el('span', { class: 'tag' }, n.노출 === 'Y' ? '노출' : '숨김'), btns);
     };
     const rows = [];
     const walk = pid => t.kids(pid).forEach(n => { rows.push(nodeRow(n)); walk(n.id); });
     walk('');
-    const nm = el('input', { placeholder: '예) 신선식품' }), ver = el('input', { placeholder: '9+1', style: 'max-width:100px' });
+    const nm = el('input', { placeholder: '예) 신선식품' });
     const bAdd = el('button', { class: 'btn primary' }, '대분류 추가');
-    bAdd.onclick = () => act(bAdd, () => save({ 이름: nm.value, 체계버전: ver.value }, '대분류를 추가했습니다.'));
+    bAdd.onclick = () => act(bAdd, () => save({ 이름: nm.value }, '대분류를 추가했습니다.'));
     appendKids(head, excelBar('categories'),
-      isStaff() ? el('div', { class: 'form' }, el('div', { class: 'inline' }, field('새 대분류', nm), field('체계 버전', ver)), bAdd, el('small', null, '중분류·소분류는 아래 목록의 "추가" 버튼으로 만듭니다.')) : null,
+      isStaff() ? el('div', { class: 'form' }, field('새 대분류', nm), bAdd, el('small', null, '중분류·소분류는 아래 목록의 "추가" 버튼으로 만듭니다.')) : null,
+      el('p', { class: 'lead' }, '분류별 상품 수는 하위 분류까지 합친 수입니다. 상태 이름에 손을 올리면 뜻이 보이고, 전체 수에는 삭제한 상품을 넣지 않습니다.'),
       el('div', { class: 'list' }, rows.length ? rows : el('div', { class: 'empty' }, '등록된 분류가 없습니다.')));
     return head;
   }
@@ -913,6 +1033,7 @@ async function viewVendorEdit(id) {
     form, locked ? null : el('div', { class: 'actions' }, bSave, el('a', { class: 'btn ghost', href: '#/masters/vendors' }, '목록으로')),
     id && canEdit() ? el('div', { class: 'actions' }, bContract) : null);
 }
+
 let xlsxReady = null;
 function loadXlsx() {
   if (window.XLSX) return Promise.resolve();
@@ -928,7 +1049,14 @@ async function exportExcel(kind) {
   const cfg = XL[kind];
   const rows = exportRows(kind).map(r => cfg.cols.map(c => String(r[c] === undefined || r[c] === null ? '' : r[c])));
   const ws = XLSX.utils.aoa_to_sheet([cfg.cols].concat(rows));
-  Object.keys(ws).forEach(k => { if (k[0] !== '!' && ws[k].t !== 's') { ws[k].t = 's'; ws[k].v = String(ws[k].v); } });
+  const numIdx = (cfg.nums || []).map(c => cfg.cols.indexOf(c));
+  Object.keys(ws).forEach(k => {
+    if (k[0] === '!') return;
+    const a = XLSX.utils.decode_cell(k);
+    const v = String(ws[k].v === undefined ? '' : ws[k].v);
+    if (a.r > 0 && numIdx.includes(a.c) && v !== '' && !isNaN(Number(v.replace(/,/g, '')))) { ws[k] = { t: 'n', v: Number(v.replace(/,/g, '')), z: cfg.cols[a.c] === '수수료율' ? '0.##' : '#,##0' }; }
+    else { ws[k].t = 's'; ws[k].v = v; }
+  });
   ws['!cols'] = cfg.cols.map(c => ({ wch: Math.max(8, Math.min(40, c.length * 2 + 4)) }));
   const guide = XLSX.utils.aoa_to_sheet([['칸', '쓰는 법']].concat(cfg.cols.map(c => [c, cfg.guide[c] || ''])).concat([[], ['올리는 법', '첫 번째 시트의 1행(칸 이름)은 바꾸지 마세요. 한 행이라도 오류가 있으면 아무것도 저장되지 않고, 오류 행 번호를 알려 줍니다.']]));
   guide['!cols'] = [{ wch: 16 }, { wch: 70 }];
@@ -974,11 +1102,11 @@ function excelBar(kind) {
   const out = el('div');
   const bDown = el('button', { class: 'btn small ghost' }, '엑셀 내려받기');
   bDown.onclick = () => act(bDown, () => exportExcel(kind));
-  const inp = el('input', { type: 'file', accept: '.xlsx,.xls', class: 'sr' });
+  const inp = el('input', { type: 'file', accept: '.xlsx,.xls,.csv', class: 'sr' });
   const bUp = el('button', { class: 'btn small ghost' }, '엑셀 올리기');
   bUp.onclick = () => inp.click();
   inp.onchange = () => act(bUp, async () => { out.replaceChildren(); const f = inp.files[0]; inp.value = ''; if (f) await importExcel(kind, f, out); });
-  return el('div', null, el('div', { class: 'actions', style: 'margin:8px 0' }, bDown, isStaff() ? [bUp, inp] : null), out);
+  return el('div', null, el('div', { class: 'actions', style: 'margin:8px 0' }, bDown, isStaff() ? [bUp, inp] : null), excelHelp(kind), out);
 }
 
 /* ───────── 홈 ───────── */
@@ -1014,102 +1142,117 @@ async function viewContractEdit(id) {
   let vendorId = got ? got.contract.벤더코드 : (S.flash && S.flash.vendor) || '';
   if (S.flash && S.flash.vendor) S.flash = null;
   const values = Object.assign({}, got ? got.values : {});
-  const opt = Object.assign({ A: false, B: false, S3: false }, values._opt || {});
+  const opt = Object.assign({ 자사배송: false, 업체배송: false }, values._opt || {});
   const vendor = () => vendors.find(v => v.id === vendorId);
   const trade = () => vendorTrade(vendor());
-  const parts = () => kindParts(kind, trade(), opt).filter(p => CONTRACT_DOCS[p]);
-  const fieldsBox = el('div', { class: 'form' });
-  const optBox = el('div');
-  const partyBox = el('div');
+  const shipsOn = () => !!CONTRACT_KINDS[kind].ship && ['직매입', '위탁판매'].includes(trade());
+  const ctx = () => ({ trade: trade(), ships: shipsOn() ? SHIP_TAGS.filter(s => opt[s]) : [] });
+  const docs = () => (vendor() ? compileKind(kind, data.forms || FORMS_DEFAULT, ctx()) : []);
+  const fieldsBox = el('div', { class: 'form' }), optBox = el('div'), partyBox = el('div'), venWrap = el('div');
   const preview = el('div', { class: 'preview-wrap' });
   const status = el('p', { class: 'note' });
   const kindSel = select(Object.keys(CONTRACT_KINDS).map(k => [k, CONTRACT_KINDS[k].name]), kind, { onchange: () => { kind = kindSel.value; buildVendorSel(); rebuild(); } });
+  const kindHint = el('small');
   let venSel;
   function buildVendorSel() {
     const allowed = CONTRACT_KINDS[kind].party;
-    const list = vendors.filter(v => allowed.includes(v.구분));
+    const need = CONTRACT_KINDS[kind].trade;
+    const list = vendors.filter(v => allowed.includes(v.구분) && (!need || vendorTrade(v) === need));
     if (!list.some(v => v.id === vendorId)) vendorId = '';
-    venSel = select([['', list.length ? '상대방을 고르세요' : allowed.join('·') + ' 벤더를 먼저 등록하세요']].concat(list.map(v => [v.id, v.상호 + ' (' + v.id + (v.거래형태 ? ', ' + v.거래형태 : '') + ')'])), vendorId,
+    venSel = select([['', list.length ? '상대방을 고르세요' : (need ? need + ' ' : '') + allowed.join('·') + ' 벤더를 먼저 등록하세요']].concat(list.map(v => [v.id, v.상호 + ' (' + v.id + (vendorTrade(v) ? ', ' + vendorTrade(v) : '') + ')'])), vendorId,
       { onchange: () => { vendorId = venSel.value; defaultOpt(); rebuild(); } });
-    venWrap.replaceChildren(field('상대방 (' + allowed.join('·') + ')', venSel, '상대방 정보는 벤더 마스터에서 가져옵니다'));
+    venWrap.replaceChildren(field('상대방 (' + (need ? need + ' ' : '') + allowed.join('·') + ')', venSel, '상대방 정보는 벤더 마스터에서 가져옵니다'));
+    kindHint.textContent = CONTRACT_KINDS[kind].desc || '';
   }
-  const venWrap = el('div');
-  function defaultOpt() {                         // 직매입: 공급사 상품의 배송방식으로 부속서 A·B 기본 선택
-    if (kind !== 'K1' || trade() !== '직매입' || opt.A || opt.B) return;
-    const ps = data.products.filter(p => p.공급사코드 === vendorId && p.상태 !== '판매중지');
-    opt.A = !ps.length || ps.some(p => p.배송방식 === '자사배송');
-    opt.B = ps.some(p => p.배송방식 === '업체배송');
+  function defaultOpt() {
+    if (!shipsOn() || opt.자사배송 || opt.업체배송) return;
+    const ps = data.products.filter(p => p.공급사코드 === vendorId && SELLABLE.includes(p.상태));
+    opt.자사배송 = !ps.length || ps.some(p => p.배송방식 === '자사배송');
+    opt.업체배송 = ps.some(p => p.배송방식 === '업체배송');
   }
   function buildOpt() {
-    const v = vendor();
-    const tr = trade();
-    const items = [];
-    if (v && ['K1', 'S1', 'S2', 'S3', 'AD'].includes(kind) && !tr) {
+    const v = vendor(), items = [];
+    if (v && CONTRACT_KINDS[kind].party.includes('공급사') && !trade()) {
       items.push(el('p', { class: 'note warn' }, '이 벤더의 거래형태가 정해지지 않았습니다. ', el('a', { href: '#/vendor/' + encodeURIComponent(v.id) }, '벤더 정보에서 거래형태를 정하세요.')));
     }
-    if (kind === 'K1' && tr === '직매입') {
+    if (shipsOn()) {
       const ck = (k, label) => { const c = el('input', { type: 'checkbox', checked: !!opt[k] }); c.onchange = () => { opt[k] = c.checked; rebuild(); }; return el('label', { class: 'check' }, c, label); };
-      items.push(el('div', { class: 'checks' }, ck('A', '부속서 A · 자사배송'), ck('B', '부속서 B · 업체배송'), ck('S3', '별지 3 · 독점판매 특약')));
+      items.push(el('div', { class: 'checks' }, el('span', { class: 's' }, '배송방식'), ck('자사배송', '자사배송 (우리 창고 출고)'), ck('업체배송', '업체배송 (공급사 직배송)')));
     }
-    const ps = parts();
-    items.push(el('p', { class: 'lead' }, '구성: ' + (ps.length ? ps.map(p => CONTRACT_DOCS[p].title).join(' + ') : '상대방을 고르면 정해집니다')));
+    const ds = docs();
+    items.push(el('p', { class: 'lead' }, ds.length ? '들어가는 문서: ' + ds.map(d => d.title).join(' + ') + ' · 조항 ' + ds[0].blocks.filter(b => b.t === 'h').length + '개' : '상대방을 고르면 계약서가 만들어집니다.'));
     optBox.replaceChildren(...items);
   }
   function inputFor(k) {
-    const m = KEY_META[k] || { t: 'text' };
+    const m = metaOf(k);
     const ch = choicesFor(kind, trade())[k] || [];
     if (m.t === 'select') {
-      if (ch.length === 1 && !values[k]) values[k] = ch[0];
-      if (values[k] && !ch.includes(values[k])) values[k] = '';
-      const s = select((ch.length === 1 ? [] : [['', '선택하세요']]).concat(ch.map(v => [v, v])), values[k] || '');
-      s.addEventListener('change', () => { values[k] = s.value; refresh(); });
-      return field(m.label, s, ch.length ? (ch.length === 1 ? '지금은 선택지가 하나입니다' : '목록에서 고릅니다') : '설정에서 선택 목록을 먼저 만드세요');
+      if (ch.length === 1 && !values[k] && !m.custom) values[k] = ch[0];
+      const extra = (m.na ? [[m.na, m.na]] : []).concat(m.custom ? [['__custom', '직접 입력…']] : []);
+      const isCustom = values[k] && !ch.includes(values[k]) && values[k] !== m.na;
+      const s = select((ch.length === 1 && !m.custom ? [] : [['', '선택하세요']]).concat(ch.map(v => [v, v])).concat(extra), isCustom ? '__custom' : (values[k] || ''));
+      const free = el('input', { value: isCustom ? values[k] : '', placeholder: m.ex ? '예) ' + m.ex : '', style: isCustom ? '' : 'display:none', 'aria-label': m.label + ' 직접 입력' });
+      s.addEventListener('change', () => {
+        free.style.display = s.value === '__custom' ? '' : 'none';
+        values[k] = s.value === '__custom' ? free.value.trim() : s.value;
+        if (s.value === '__custom') free.focus();
+        refresh();
+      });
+      free.addEventListener('input', () => { values[k] = free.value.trim(); refresh(); });
+      return field(m.label, el('div', { class: 'stack' }, s, free), ch.length ? (m.custom ? '목록에서 고르거나 "직접 입력"을 고릅니다' : (ch.length === 1 ? '지금은 선택지가 하나입니다' : '목록에서 고릅니다')) : '설정에서 선택 목록을 먼저 만드세요');
     }
     if (m.t === 'textarea') {
       const ta = el('textarea', { value: values[k] || '', rows: 4, placeholder: '예) ' + (m.ex || '') });
       ta.addEventListener('input', () => { values[k] = ta.value; refresh(); });
-      return field(m.label + ' (마지막 조항)', ta, '줄마다 적습니다. 비워 두면 계약서에 "없음"으로 들어갑니다.');
+      return field(m.label, ta, '줄마다 적습니다. 비워 두면 계약서에 "없음"으로 들어갑니다.');
     }
     if (m.t === 'calc' || m.t === 'auto') return null;
-    const inp = el('input', { type: m.t === 'date' ? 'date' : 'text', value: values[k] || '', placeholder: m.ex ? '예) ' + m.ex : '', inputmode: m.t === 'won' ? 'numeric' : null, 'aria-label': m.label });
-    inp.addEventListener('input', () => { values[k] = m.t === 'won' ? fmtComma(inp.value) : inp.value.trim(); if (m.t === 'won' && inp.value !== values[k]) inp.value = values[k]; refresh(); });
-    return field(m.label, inp, m.t === 'won' ? '숫자만 넣으면 쉼표가 붙습니다' : null);
+    const inp = m.t === 'won' ? numInput(values[k] || '', { placeholder: m.ex ? '예) ' + fmtComma(m.ex) : '', 'aria-label': m.label })
+      : el('input', { type: m.t === 'date' ? 'date' : 'text', value: values[k] || '', placeholder: m.ex ? '예) ' + m.ex : '', 'aria-label': m.label });
+    inp.addEventListener('input', () => { values[k] = m.t === 'won' ? fmtComma(inp.value) : inp.value.trim(); refresh(); });
+    return field(m.label + (KEY_META[k] ? '' : ' (양식에 새로 추가된 칸)'), inp, m.t === 'won' ? '숫자만 넣으면 쉼표가 붙습니다' : null);
   }
   function buildFields() {
-    const keys = partsKeys(parts());
+    const keys = docsKeys(docs());
     const pv = vendor() ? partyValues(vendor()) : {};
-    const autos = keys.filter(k => (KEY_META[k] || {}).t === 'auto' && k.startsWith('상대_'));
+    const autos = keys.filter(k => metaOf(k).t === 'auto' && k in pv);
     const missing = autos.filter(k => !pv[k]);
     partyBox.replaceChildren(vendor() ? el('div', { class: 'form' },
       el('div', { class: 's' }, '상대방 정보 (벤더 마스터에서 자동)'),
       el('div', { class: 'kv' }, autos.map(k => el('div', null, el('small', null, keyLabel(k).replace('상대방 ', '')), el('b', { class: pv[k] ? null : 'bad' }, pv[k] || '비어 있음')))),
       missing.length ? el('p', { class: 'note warn' }, '비어 있는 정보가 있어 확정할 수 없습니다. ', el('a', { href: '#/vendor/' + encodeURIComponent(vendorId) }, '벤더 정보 채우기')) : null) : null);
-    const calc = keys.filter(k => (KEY_META[k] || {}).t === 'calc');
+    const calc = keys.filter(k => metaOf(k).t === 'calc');
     fieldsBox.replaceChildren(...keys.map(inputFor).filter(Boolean),
       calc.length ? el('p', { class: 'note', id: 'calcline' }) : null,
-      keys.includes('거래조건표_번호') ? el('p', { class: 'lead' }, '별지 1 거래조건표는 이 공급사의 상품 정보로 자동으로 만들어지고, 번호는 확정할 때 계약번호로 붙습니다.') : null);
+      keys.includes('거래조건표_번호') ? el('p', { class: 'lead' }, '별지 1 거래조건표는 이 공급사의 상품 정보(판매대기·판매중·판매보류)로 자동으로 만들어지고, 번호는 확정할 때 계약번호로 붙습니다.') : null);
   }
   let pageTimer = null;
   function refresh() {
-    const ps = parts();
-    const pv = previewValues(kind, vendor(), ps, values);
+    const ds = docs();
+    const pv = previewValues(vendor(), ds, values);
     const cl = document.getElementById('calcline');
-    if (cl) cl.textContent = pv.광고_게재일수 ? '게재 ' + pv.광고_게재일수 + '일 · 할인율 ' + Math.round(adCalc(pv.광고_시작일, pv.광고_종료일, pv.광고_일단가).rate * 100) + '% · 광고료 총액 ' + (pv.광고료_총액 || '—') + '원(VAT 별도)' : '게재 시작일·종료일과 일 단가를 넣으면 광고료가 자동 계산됩니다.';
+    if (cl) { const r = adCalc(pv.광고_시작일, pv.광고_종료일, pv.광고_일단가); cl.textContent = r && pv.광고료_총액 ? '게재 ' + r.days + '일 · 할인율 ' + Math.round(r.rate * 100) + '% · 광고료 총액 ' + pv.광고료_총액 + '원(VAT 별도)' : '게재 시작일·종료일과 일 단가를 넣으면 광고료가 자동 계산됩니다.'; }
     clearTimeout(pageTimer);
-    pageTimer = setTimeout(() => preview.replaceChildren(ps.length ? renderPaged(ps, pv, S.settings) : el('div', { class: 'empty' }, '계약 종류와 상대방을 고르면 미리보기가 나옵니다.')), 150);
-    const keys = partsKeys(ps);
-    const empty = keys.filter(k => { const m = KEY_META[k] || {}; return !m.opt && m.t !== 'auto' && m.t !== 'calc' && !values[k]; }).length;
-    status.textContent = !ps.length ? '상대방을 고르세요.' : (empty ? '빈 칸 ' + empty + '개 — 미리보기에 노란색으로 표시됩니다.' : '모든 칸이 채워졌습니다. 계약일은 서명할 때 정해집니다.');
-    status.className = 'note' + (empty || !ps.length ? ' warn' : '');
+    pageTimer = setTimeout(() => {
+      preview.replaceChildren(ds.length ? renderPaged(ds, pv, S.settings) : el('div', { class: 'empty' }, '계약 종류와 상대방을 고르면 미리보기가 나옵니다.'));
+      const pg = preview.querySelector('.pages');
+      const n = pg ? pg.querySelectorAll('.pg').length : 0;
+      const body = pg ? paginate(ds[0], pv, S.settings).length : 0;
+      preview.prepend(el('p', { class: 'note' + (body > 3 ? ' warn' : '') }, '계약서 본문 ' + body + '쪽' + (n > body ? ' + 별지 ' + (n - body) + '쪽' : '') + (body > 3 ? ' — 3쪽을 넘습니다. 특약사항을 줄이거나 양식을 다듬으세요.' : '')));
+    }, 150);
+    const keys = docsKeys(ds);
+    const empty = keys.filter(k => { const m = metaOf(k); return !m.opt && m.t !== 'auto' && m.t !== 'calc' && !values[k]; }).length;
+    status.textContent = !ds.length ? '상대방을 고르세요.' : (empty ? '빈 칸 ' + empty + '개 — 미리보기에 노란색으로 표시됩니다.' : '모든 칸이 채워졌습니다. 계약일은 서명할 때 정해집니다.');
+    status.className = 'note' + (empty || !ds.length ? ' warn' : '');
   }
   function rebuild() { buildOpt(); buildFields(); refresh(); }
-  const pick = () => { const o = {}; partsKeys(parts()).forEach(k => { const m = KEY_META[k] || {}; if (m.t !== 'auto' && m.t !== 'calc') o[k] = values[k] || ''; }); return o; };
+  const pick = () => { const o = {}; docsKeys(docs()).forEach(k => { const m = metaOf(k); if (m.t !== 'auto' && m.t !== 'calc') o[k] = values[k] || ''; }); return o; };
   async function save() {
     if (!vendorId) throw new Error('상대방(벤더)을 먼저 고르세요.');
     const d = await api('contract.saveDraft', { id: curId, 종류: kind, 벤더코드: vendorId, opt: opt, values: pick() });
     curId = d.id;
     upsert('contracts', d);
-    rememberDetail({ contract: d, values: Object.assign(pick(), { _opt: opt, _parts: parts() }), attachments: [], checklist: [] });
+    rememberDetail({ contract: d, values: Object.assign(pick(), { _opt: opt, _ctx: ctx() }), attachments: [], checklist: [] });
     history.replaceState(null, '', '#/contract/' + encodeURIComponent(d.id) + '/edit');
     return d;
   }
@@ -1126,7 +1269,7 @@ async function viewContractEdit(id) {
     location.hash = '#/contract/' + encodeURIComponent(d.contract.id);
   });
   const bPrint = el('button', { class: 'btn ghost' }, '미리보기 인쇄');
-  bPrint.onclick = () => act(bPrint, () => printDoc(parts(), previewValues(kind, vendor(), parts(), values), S.settings));
+  bPrint.onclick = () => act(bPrint, () => printDoc(docs(), previewValues(vendor(), docs(), values), S.settings));
   const bDel = el('button', { class: 'btn ghost' }, '초안 지우기');
   bDel.onclick = () => act(bDel, async () => {
     if (!curId) { location.hash = '#/contracts'; return; }
@@ -1144,14 +1287,14 @@ async function viewContractEdit(id) {
     el('h1', null, curId ? '계약 작성 · ' + curId : '새 계약'),
     el('div', { class: 'split' },
       el('div', null,
-        el('div', { class: 'form' }, field('계약 종류', kindSel, CONTRACT_KINDS[kind].desc || null), venWrap, optBox),
+        el('div', { class: 'form' }, field('계약 종류', kindSel), kindHint, venWrap, optBox),
         partyBox,
         el('h2', null, '입력값'), status, fieldsBox,
         el('div', { class: 'actions' }, bSave, isStaff() ? bConfirm : null, bPrint, bDel),
-        isStaff() ? null : el('p', { class: 'note' }, '확정은 운영기획·관리자가 합니다. 임시저장한 뒤 알려 주세요.')),
+        isStaff() ? null : el('p', { class: 'note' }, '확정은 운영기획·관리자가 합니다. 임시저장한 뒤 알려 주세요.'),
+        isAdmin() ? el('p', { class: 'lead' }, '조항 문구를 바꾸려면 ', el('a', { href: '#/forms' }, '더보기 → 계약서 양식 관리'), '에서 고칩니다.') : null),
       preview));
 }
-
 /* ───────── 계약 상세 (직원) ───────── */
 const signInfo = (who, at, name) => el('div', { class: 'row' }, el('div', { class: 'main' }, el('div', { class: 't' }, who), el('div', { class: 's' }, at ? name + ' · ' + at : '서명 전')), tagFor(at ? '확인' : '없음'));
 function credentialBox(r, c) {
@@ -1226,7 +1369,7 @@ async function viewVendorHome() {
 async function viewVendorContract(id) {
   const d = await getDetail(id, false);
   const c = d.contract;
-  const parts = (d.values._parts || String(c.구성 || '').split(',')).filter(p => CONTRACT_DOCS[p]);
+  const parts = docsOfDetail(d);
   const done = (detail, msg) => { rememberDetail(detail); toast(msg); refreshSoon(false); route(true); };
   const bPdf = el('button', { class: 'btn' }, '계약서 PDF 열기');
   bPdf.onclick = () => openFile(c.PDF파일ID);
@@ -1279,7 +1422,7 @@ async function viewContract(id) {
   const d = await getDetail(id, false);
   const c = d.contract;
   if (c.상태 === '작성중') { location.hash = '#/contract/' + encodeURIComponent(c.id) + '/edit'; return null; }
-  const parts = (d.values._parts || String(c.구성 || '').split(',')).filter(p => CONTRACT_DOCS[p]);
+  const parts = docsOfDetail(d);
   const maxMb = Number(S.settings.첨부최대MB || 10);
   const done = (detail, msg) => { rememberDetail(detail); toast(msg); refreshSoon(false); route(true); };
   async function upload(type, file, extra) {
@@ -1329,7 +1472,7 @@ async function viewContract(id) {
     el('div', { class: 'inline', style: 'gap:14px;align-items:center;margin-bottom:6px' }, stamp(c.상태),
       el('div', null, el('h1', { style: 'margin:0' }, c.상호), el('div', { class: 's', style: 'color:var(--muted);font-size:14px' }, c.id + ' · ' + c.종류명 + ' · v' + c.버전))),
     el('div', { class: 'list', style: 'margin-top:12px' },
-      info('구성', parts.map(p => CONTRACT_DOCS[p].title).join(' + ') || '이전 양식'),
+      info('구성', parts.map(p => p.title).join(' + ') + (String(c.구성 || '').includes('/') ? ' · ' + String(c.구성).split('/')[1].trim() : '') + (d.values._formVer ? ' · 양식 ' + Object.keys(d.values._formVer).map(k => k + (d.values._formVer[k] ? ' v' + d.values._formVer[k] : ' 기본')).join(', ') : '')),
       info('계약기간', (c.계약시작일 || '—') + ' ~ ' + (c.계약종료일 || '—')),
       info('계약 체결일', c.계약체결일 || '서명이 끝나면 정해집니다'),
       info('확정', (c.확정일시 || '—') + ' · ' + (c.확정자 || '')),
@@ -1465,6 +1608,528 @@ async function viewAudit() {
       el('div', { class: 't' }, a.작업 + (a.대상 ? ' · ' + a.대상 : '')), el('div', { class: 's' }, a.시각 + ' · ' + a.사용자 + (a.내용 ? ' · ' + a.내용 : ''))))) : el('div', { class: 'empty' }, '기록이 없습니다.')));
 }
 /* ───────── 시작 ───────── */
+/* ───────── 운영: 주문 · 매입 · 정산 · 손익 · 점검 ───────── */
+function opsTabs(cur) {
+  return el('div', { class: 'chips' }, [['orders', '주문'], ['purchases', '매입'], ['settle', '정산'], ['pl', '손익'], ['check', '데이터 점검']]
+    .filter(([k]) => isStaff() || ['orders', 'purchases'].includes(k))
+    .map(([k, t]) => el('a', { class: 'chip' + (k === cur ? ' on' : ''), href: '#/ops/' + k }, t)));
+}
+const kd = d => new Date(Date.now() + 9 * 3600000 - (d || 0) * 86400000).toISOString().slice(0, 10);
+function gridTable(head, rows, numCols) {
+  numCols = numCols || [];
+  return el('div', { class: 'gridwrap' }, el('table', { class: 'grid' },
+    el('thead', null, el('tr', null, head.map((h, i) => el('th', { class: numCols.includes(i) ? 'num' : null }, h)))),
+    el('tbody', null, rows.length ? rows.map(r => el('tr', null, r.map((c, i) => el('td', { class: numCols.includes(i) ? 'num' : null }, typeof c === 'number' ? fmtComma(c) : c))))
+      : el('tr', null, el('td', { colspan: String(head.length), class: 'empty' }, '없습니다.')))));
+}
+
+/* 주문: 아임웹 엑셀 → 칸 맞추기 → 미리보기 → 저장 */
+const ORDER_FIELDS = [
+  ['품목키', '품목 주문번호', ['품목주문번호', '상품주문번호', '주문상품번호', '품목 주문번호', '주문품목번호', '품목번호'], false],
+  ['주문번호', '주문번호', ['주문번호', '주문 번호', '주문코드'], true],
+  ['주문일시', '주문일', ['주문일시', '주문일', '주문 일시', '주문날짜', '주문 날짜'], true],
+  ['결제일시', '결제일', ['결제일시', '결제일', '결제 일시'], false],
+  ['주문상태', '주문상태', ['품목주문상태', '품목 주문상태', '주문상태', '주문 상태', '처리상태', '상태'], true],
+  ['몰상품코드', '상품코드', ['자체상품코드', '판매자상품코드', '상품코드', '상품번호', '품목코드'], false],
+  ['상품명', '상품명', ['상품명', '품목명', '상품 이름'], true],
+  ['옵션', '옵션', ['옵션', '옵션명', '옵션정보', '선택옵션'], false],
+  ['수량', '수량', ['수량', '주문수량', '구매수량'], true],
+  ['판매단가', '판매가', ['판매가', '판매단가', '상품가격', '단가'], false],
+  ['상품금액', '상품금액', ['상품금액', '상품합계', '상품구매금액', '상품 금액', '주문금액'], false],
+  ['할인금액', '할인금액', ['할인금액', '총할인금액', '쿠폰할인', '상품할인', '할인'], false],
+  ['결제금액', '결제금액', ['결제금액', '실결제금액', '최종결제금액', '총결제금액', '결제 금액'], true],
+  ['배송비', '배송비', ['배송비', '배송료'], false],
+  ['결제수단', '결제수단', ['결제수단', '결제방법'], false],
+  ['배송완료일', '배송완료일', ['배송완료일', '배송완료일시', '배송 완료일'], false],
+  ['구매확정일', '구매확정일', ['구매확정일', '구매확정일시', '구매 확정일'], false],
+  ['회원구분', '회원등급', ['회원등급', '회원그룹', '회원구분'], false],
+  ['송장번호', '송장번호', ['송장번호', '운송장번호'], false],
+  ['택배사', '택배사', ['택배사', '배송업체'], false]
+];
+const cellStr = v => (v instanceof Date ? new Date(v.getTime() - v.getTimezoneOffset() * 60000).toISOString().slice(0, 19).replace('T', ' ') : String(v === undefined || v === null ? '' : v).trim());
+async function orderUploadFlow(file, box) {
+  await loadXlsx();
+  const wb = XLSX.read(await file.arrayBuffer(), { type: 'array', cellDates: true });
+  const ws = wb.Sheets[wb.SheetNames[0]];
+  const raw = XLSX.utils.sheet_to_json(ws, { defval: '', raw: true });
+  if (!raw.length) throw new Error('첫 시트에 주문 줄이 없습니다.');
+  const heads = Object.keys(raw[0]);
+  const map = {};
+  ORDER_FIELDS.forEach(([k, , syn]) => { map[k] = syn.find(s => heads.includes(s)) || ''; });
+  const stateMap = {};
+  const mapBox = el('div', { class: 'form' }), stateBox = el('div'), prevBox = el('div');
+  let lastRows = null;
+  function drawMap() {
+    mapBox.replaceChildren(el('h2', { style: 'margin:0' }, '1. 칸 맞추기'), el('p', { class: 'lead' }, file.name + ' · ' + raw.length + '줄. 화프스 칸마다 파일의 어느 칸을 쓸지 확인하세요. * 표시는 꼭 필요합니다.'),
+      el('div', { class: 'mapgrid' }, ORDER_FIELDS.map(([k, label, , req]) => {
+        const s = select([['', '(쓰지 않음)']].concat(heads.map(h => [h, h])), map[k]);
+        s.onchange = () => { map[k] = s.value; drawStates(); prevBox.replaceChildren(); };
+        return field(label + (req ? ' *' : ''), s);
+      })));
+  }
+  function drawStates() {
+    const col = map.주문상태;
+    const vals = col ? [...new Set(raw.map(r => cellStr(r[col])))].filter(Boolean) : [];
+    vals.forEach(v => { if (!(v in stateMap)) stateMap[v] = normOrderState(v); });
+    stateBox.replaceChildren(el('div', { class: 'form' }, el('h2', { style: 'margin:0' }, '2. 주문상태 맞추기'),
+      el('p', { class: 'lead' }, '파일의 상태 이름을 화프스 표준 상태로 바꿉니다. 비어 있는 것은 꼭 골라 주세요.'),
+      vals.length ? el('div', { class: 'mapgrid' }, vals.map(v => {
+        const s = select([['', '고르세요']].concat(ORDER_STATES.map(x => [x, x])), stateMap[v]);
+        s.onchange = () => { stateMap[v] = s.value; prevBox.replaceChildren(); };
+        return field(v, s);
+      })) : el('p', { class: 'note warn' }, '주문상태 칸을 먼저 맞추세요.')));
+  }
+  function build() {
+    const miss = ORDER_FIELDS.filter(([k, , , req]) => req && !map[k] && !(k === '결제금액' && map.상품금액) && !(k === '상품명' && map.몰상품코드)).map(f => f[1]);
+    if (miss.length) throw new Error('꼭 필요한 칸이 없습니다: ' + miss.join(', '));
+    const unmapped = Object.keys(stateMap).filter(v => !stateMap[v]);
+    if (unmapped.length) throw new Error('주문상태를 골라 주세요: ' + unmapped.join(', '));
+    const rows = raw.map(r => { const o = {}; ORDER_FIELDS.forEach(([k]) => { o[k] = map[k] ? cellStr(r[map[k]]) : ''; }); o.원래상태 = o.주문상태; o.주문상태 = stateMap[o.주문상태] || ''; return o; })
+      .filter(o => o.주문번호);
+    const notes = [];
+    const groups = {};
+    rows.forEach((o, i) => { (groups[o.주문번호] = groups[o.주문번호] || []).push(i); });
+    const n = v => Number(String(v).replace(/[^0-9.-]/g, '')) || 0;
+    let payAlloc = 0, shipAlloc = 0;
+    Object.values(groups).forEach(idx => {
+      if (idx.length < 2) return;
+      const pays = idx.map(i => n(rows[i].결제금액)), items = idx.map(i => n(rows[i].상품금액) || n(rows[i].판매단가) * n(rows[i].수량));
+      if (map.결제금액 && pays.every(p => p === pays[0]) && pays[0] > 0) {      // 주문 전체 금액이 줄마다 반복 → 품목 금액 비율로 나눔
+        const base = items.reduce((a, b) => a + b, 0) || idx.length;
+        let left = pays[0];
+        idx.forEach((i, j) => { const share = j === idx.length - 1 ? left : Math.round(pays[0] * (items.reduce((a, b) => a + b, 0) ? items[j] : 1) / base); rows[i].결제금액 = String(share); left -= share; });
+        payAlloc++;
+      }
+      const ships = idx.map(i => n(rows[i].배송비));
+      if (ships.every(s => s === ships[0]) && ships[0] > 0) { idx.forEach((i, j) => { if (j) rows[i].배송비 = '0'; }); shipAlloc++; }
+    });
+    if (payAlloc) notes.push('결제금액이 주문 전체 금액으로 줄마다 반복된 주문 ' + payAlloc + '건은 상품금액 비율로 나눴습니다(이중 계산 방지).');
+    if (shipAlloc) notes.push('배송비가 줄마다 반복된 주문 ' + shipAlloc + '건은 첫 줄에만 넣었습니다.');
+    if (!map.품목키) {
+      const seq = {};
+      rows.forEach(o => { seq[o.주문번호] = (seq[o.주문번호] || 0) + 1; o.품목키 = o.주문번호 + '-' + seq[o.주문번호]; });
+      notes.push('품목 주문번호 칸이 없어 "주문번호-순번"으로 구분합니다. 다시 올릴 때도 같은 순서의 파일을 쓰세요.');
+    }
+    return { rows, notes };
+  }
+  const bPrev = el('button', { class: 'btn primary' }, '3. 미리보기 (저장 안 함)');
+  bPrev.onclick = () => act(bPrev, async () => {
+    const b = build();
+    const r = await api('order.import', { rows: b.rows, dryRun: true, 파일명: file.name });
+    lastRows = r.errors ? null : b.rows;
+    const s = r.summary || {};
+    const bSave = el('button', { class: 'btn seal', disabled: !!r.errors }, '4. 저장하기');
+    bSave.onclick = () => act(bSave, async () => {
+      const res = await api('order.import', { rows: lastRows, 파일명: file.name });
+      toast('주문을 저장했습니다: 신규 ' + res.summary.신규 + ', 수정 ' + res.summary.수정 + ', 그대로 ' + res.summary.그대로);
+      S.flash = { orders: [res.summary.첫주문일 || kd(90), res.summary.끝주문일 || kd(0)] };
+      box.replaceChildren(); route(true);
+    });
+    prevBox.replaceChildren(el('div', { class: 'form' }, el('h2', { style: 'margin:0' }, '미리보기 결과'),
+      b.notes.map(t => el('p', { class: 'note' }, t)),
+      r.errors ? el('div', { class: 'note warn' }, el('b', null, '오류 ' + r.오류수 + '건 — 고친 뒤 다시 올리세요. 저장하지 않았습니다.'), el('ul', null, r.errors.slice(0, 30).map(e => el('li', null, e.행 + '행: ' + e.오류))))
+        : el('div', { class: 'kv' }, [['신규', s.신규], ['수정', s.수정], ['그대로', s.그대로], ['상품 미연결', s.미연결], ['자동 구매확정', s.자동구매확정], ['결제금액 합계', fmtComma(s.결제합계) + '원'], ['주문 기간', (s.첫주문일 || '') + ' ~ ' + (s.끝주문일 || '')]]
+          .map(([k, v]) => el('div', null, el('small', null, k), el('b', { class: 'num' }, String(v))))),
+      r.warnings && r.warnings.length ? el('details', null, el('summary', null, '확인할 점 ' + (r.경고수 || r.warnings.length) + '건'), el('ul', null, r.warnings.map(w => el('li', null, w.행 + '행: ' + w.내용)))) : null,
+      el('div', { class: 'actions' }, bSave)));
+  });
+  drawMap(); drawStates();
+  box.replaceChildren(mapBox, stateBox, el('div', { class: 'actions' }, bPrev), prevBox);
+}
+async function viewOrders() {
+  const data = await ensureData();
+  const upBox = el('div');
+  const inp = el('input', { type: 'file', accept: '.xlsx,.xls,.csv', class: 'sr' });
+  const bUp = el('button', { class: 'btn primary' }, '아임웹 주문 엑셀 올리기');
+  bUp.onclick = () => inp.click();
+  inp.onchange = () => act(bUp, async () => { const f = inp.files[0]; inp.value = ''; if (f) await orderUploadFlow(f, upBox); });
+  const range = S.flash && S.flash.orders ? S.flash.orders : null;
+  if (range) S.flash = null;
+  const from = el('input', { type: 'date', value: range ? range[0] : kd(90) }), to = el('input', { type: 'date', value: range ? range[1] : kd(0) });
+  const st = select([['', '모든 상태']].concat(ORDER_STATES.map(x => [x, x])), '');
+  const un = el('input', { type: 'checkbox' }), q = el('input', { type: 'search', placeholder: '주문번호·상품명' });
+  const listBox = el('div');
+  const prodSel = select([['', '연결할 상품']].concat(data.products.filter(p => p.상태 !== '삭제').map(p => [p.id, p.상품명 + ' (' + p.id + ')'])), '');
+  const saveMall = el('input', { type: 'checkbox', checked: true });
+  async function load() {
+    const r = await api('order.list', { from: from.value, to: to.value, 상태: st.value, 미연결: un.checked, q: q.value.trim() }, { silent: true });
+    const s = r.summary;
+    const checks = [];
+    const rows = r.rows.map(o => {
+      const c = !o.상품ID && !o.정산번호 ? el('input', { type: 'checkbox', value: o.id, 'data-mall': o.몰상품코드 || '' }) : null;
+      if (c) checks.push(c);
+      return [c || '', String(o.주문일시).slice(0, 16), o.주문번호, o.상품명 + (o.옵션 ? ' / ' + o.옵션 : ''), Number(o.수량), Number(o.결제금액), o.주문상태 + (o.원래상태 && o.원래상태 !== o.주문상태 ? ' (' + o.원래상태 + ')' : ''),
+        o.상품ID ? o.상품ID + ' · ' + (o.거래형태 || '') : el('span', { class: 'bad' }, '미연결'), o.정산번호 || ''];
+    });
+    const bLink = el('button', { class: 'btn small' }, '고른 주문을 이 상품에 연결');
+    bLink.onclick = () => act(bLink, async () => {
+      const ids = checks.filter(c => c.checked).map(c => c.value);
+      if (!ids.length) throw new Error('연결할 주문을 체크하세요.');
+      if (!prodSel.value) throw new Error('연결할 상품을 고르세요.');
+      const mall = checks.filter(c => c.checked).map(c => c.dataset.mall).find(Boolean);
+      const res = await api('order.link', { ids, 상품ID: prodSel.value, 몰상품코드저장: saveMall.checked, 몰상품코드: mall });
+      toast(res.linked + '줄을 연결했습니다.'); refreshSoon(true); load();
+    });
+    listBox.replaceChildren(
+      el('div', { class: 'kv' }, [['줄 수', s.줄수], ['결제금액 합계', fmtComma(s.결제합계) + '원'], ['미연결', s.미연결]].concat(Object.keys(s.상태별).map(k => [k, s.상태별[k]]))
+        .map(([k, v]) => el('div', null, el('small', null, k), el('b', { class: 'num' + (k === '미연결' && v ? ' bad' : '') }, String(v))))),
+      r.잘림 ? el('p', { class: 'note' }, '최근 1,000줄만 보여 줍니다. 기간을 줄여 보세요.') : null,
+      gridTable(['', '주문일', '주문번호', '상품 / 옵션', '수량', '결제금액', '상태', '연결 상품', '정산'], rows, [4, 5]),
+      isStaff() && checks.length ? el('div', { class: 'form' }, el('b', null, '미연결 주문 연결'), prodSel, el('label', { class: 'check' }, saveMall, '이 주문의 상품코드를 상품의 몰상품코드로 저장(다음부터 자동 연결)'), bLink) : null);
+  }
+  const bFind = el('button', { class: 'btn' }, '조회');
+  bFind.onclick = () => act(bFind, load);
+  setTimeout(() => load().catch(e => listBox.replaceChildren(el('p', { class: 'note warn' }, e.message))), 0);
+  return el('div', null, el('h1', null, '주문'), opsTabs('orders'),
+    isStaff() ? el('div', { class: 'form' }, el('b', null, '주문 올리기'),
+      el('p', { class: 'lead', style: 'margin:0' }, '아임웹 관리자 → 주문 관리 → 엑셀 다운로드(품목 단위 권장)로 받은 파일을 고칠 필요 없이 올립니다. 첫 시트의 1행이 칸 이름이어야 합니다.'),
+      el('div', { class: 'actions', style: 'margin:0' }, bUp, inp), upBox) : null,
+    el('h2', null, '주문 조회'),
+    el('div', { class: 'form' }, el('div', { class: 'inline' }, field('주문일 부터', from), field('까지', to), field('상태', st)), el('div', { class: 'inline' }, q, el('label', { class: 'check' }, un, '미연결만'), bFind)),
+    listBox);
+}
+
+/* 매입: 자사배송 직매입 입고 */
+async function viewPurchases() {
+  const data = await ensureData();
+  const list = data.purchases || [];
+  const vendors = data.vendors.filter(v => vendorTrade(v) === '직매입');
+  const ven = select([['', '공급사 고르기']].concat(vendors.map(v => [v.id, v.상호 + ' (' + v.id + ')'])), '');
+  const date = el('input', { type: 'date', value: kd(0) });
+  const wh = select([['', '창고 선택 안 함']].concat(data.warehouses.map(w => [w.id, w.이름])), '');
+  const memo = el('input', { placeholder: '예) 11월 1차 입고' });
+  const lines = el('div', { class: 'lines' });
+  const total = el('p', { class: 'note' });
+  let editNo = '';
+  const prodsOf = () => data.products.filter(p => p.공급사코드 === ven.value && p.배송방식 !== '업체배송' && SELLABLE.includes(p.상태));
+  function sum() {
+    let s = 0;
+    lines.querySelectorAll('.line').forEach(l => { s += num(l.querySelector('.q').value) * num(l.querySelector('.u').value); });
+    total.textContent = '공급가액 합계 ' + fmtComma(Math.round(s)) + '원 (부가세 별도, 면세 상품은 부가세 없음)';
+  }
+  function addLine(v) {
+    v = v || {};
+    const ps = prodsOf();
+    const p = select([['', ps.length ? '상품 고르기' : '이 공급사의 자사배송 상품이 없습니다']].concat(ps.map(x => [x.id, x.상품명 + ' (' + x.id + ')'])), v.상품ID || '');
+    const q = numInput(v.수량 || '', { class: 'num q', placeholder: '수량' });
+    const u = numInput(v.단가 || '', { class: 'num u', placeholder: '단가' });
+    const amt = el('span', { class: 'num' });
+    const upd = () => { amt.textContent = fmtComma(Math.round(num(q.value) * num(u.value))) + '원'; sum(); };
+    p.onchange = () => { const x = data.products.find(y => y.id === p.value); if (x && !u.value) u.value = fmtComma(x.공급가); upd(); };
+    q.addEventListener('input', upd); u.addEventListener('input', upd);
+    const del = el('button', { class: 'btn small ghost', type: 'button' }, '빼기');
+    const line = el('div', { class: 'line' }, p, q, u, amt, del);
+    del.onclick = () => { line.remove(); sum(); };
+    lines.appendChild(line); upd();
+  }
+  ven.onchange = () => { lines.replaceChildren(); addLine(); };
+  const bAdd = el('button', { class: 'btn small', type: 'button' }, '+ 상품 줄 추가');
+  bAdd.onclick = () => { if (!ven.value) return toast('공급사를 먼저 고르세요.', 'err'); addLine(); };
+  const bSave = el('button', { class: 'btn primary' }, '입고 등록');
+  bSave.onclick = () => act(bSave, async () => {
+    const ls = [...lines.querySelectorAll('.line')].map(l => ({ 상품ID: l.querySelector('select').value, 수량: l.querySelector('.q').value, 단가: l.querySelector('.u').value })).filter(l => l.상품ID);
+    S.data.purchases = await api('purchase.save', { 매입번호: editNo || undefined, 공급사코드: ven.value, 입고일: date.value, 창고ID: wh.value, 메모: memo.value, lines: ls });
+    persistData(); toast(editNo ? '매입을 고쳤습니다.' : '입고를 등록했습니다. 운영기획이 확정하면 정산에 들어갑니다.'); route(true);
+  });
+  const groups = {};
+  list.filter(r => r.상태 !== '삭제').forEach(r => { (groups[r.매입번호] = groups[r.매입번호] || []).push(r); });
+  const rows = Object.keys(groups).sort().reverse().map(no => {
+    const g = groups[no], h = g[0];
+    const st = h.상태, sup = g.reduce((a, r) => a + num(r.공급가액), 0), tax = g.reduce((a, r) => a + num(r.부가세), 0);
+    const btns = [];
+    if (st === '등록' && isStaff()) { const b = el('button', { class: 'btn small seal' }, '확정'); b.onclick = () => act(b, async () => { S.data.purchases = await api('purchase.state', { 매입번호: no, 상태: '확정' }); persistData(); toast(no + ' 확정'); route(true); }); btns.push(b); }
+    if (st === '등록') { const b = el('button', { class: 'btn small ghost' }, '고치기'); b.onclick = () => { editNo = no; ven.value = h.공급사코드; date.value = h.입고일; wh.value = h.창고ID || ''; memo.value = h.메모 || ''; lines.replaceChildren(); g.forEach(r => addLine(r)); bSave.textContent = no + ' 고쳐 저장'; window.scrollTo(0, 0); }; btns.push(b); }
+    if (st !== '취소' && !g.some(r => r.정산번호) && isStaff()) { const b = el('button', { class: 'btn small ghost' }, '취소'); b.onclick = () => act(b, async () => { if (!confirm(no + ' 매입을 취소할까요?')) return; S.data.purchases = await api('purchase.state', { 매입번호: no, 상태: '취소' }); persistData(); route(true); }); btns.push(b); }
+    return [no, h.입고일, h.상호, g.map(r => r.상품명 + ' ×' + fmtComma(r.수량)).join(', '), sup, tax, el('span', { class: 'tag' + (st === '확정' ? ' ok' : st === '취소' ? ' no' : '') }, st), g[0].정산번호 || '', el('span', null, btns)];
+  });
+  return el('div', null, el('h1', null, '매입 (입고)'), opsTabs('purchases'),
+    el('div', { class: 'form' }, el('b', null, editNo ? editNo + ' 고치기' : '입고 등록'),
+      el('div', { class: 'two' }, field('공급사 (직매입)', ven), field('입고일', date)), el('div', { class: 'two' }, field('창고', wh), field('메모', memo)),
+      el('div', { class: 'lineshead' }, el('span', null, '상품'), el('span', { class: 'num' }, '수량'), el('span', { class: 'num' }, '단가 (VAT 별도)'), el('span', { class: 'num' }, '금액'), el('span')),
+      lines, el('div', { class: 'inline' }, bAdd), total, el('div', { class: 'actions', style: 'margin:0' }, bSave)),
+    el('h2', null, '매입 목록'),
+    gridTable(['매입번호', '입고일', '공급사', '상품', '공급가액', '부가세', '상태', '정산', ''], rows, [4, 5]),
+    el('p', { class: 'lead' }, '업체배송 상품의 매입은 주문이 구매확정되면 정산할 때 자동으로 들어갑니다(이 목록에는 나오지 않습니다).'));
+}
+
+/* 정산 */
+function settlePreset(kind) {
+  const d = new Date(Date.now() + 9 * 3600000);
+  const ymd = x => x.toISOString().slice(0, 10);
+  if (kind === '직매입') { const w = d.getUTCDay() || 7; const mon = new Date(d.getTime() - (w + 6) * 86400000); return [ymd(mon), ymd(new Date(mon.getTime() + 6 * 86400000))]; }
+  if (kind === '위탁판매') {
+    const y = d.getUTCFullYear(), m = d.getUTCMonth(), day = d.getUTCDate();
+    if (day > 15) return [ymd(new Date(Date.UTC(y, m, 1))), ymd(new Date(Date.UTC(y, m, 15)))];
+    return [ymd(new Date(Date.UTC(y, m - 1, 16))), ymd(new Date(Date.UTC(y, m, 0)))];
+  }
+  return [ymd(new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1))), ymd(new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0)))];
+}
+async function viewSettle() {
+  if (!isStaff()) throw new Error('정산은 운영기획·관리자만 볼 수 있습니다.');
+  const data = await ensureData();
+  const kind = select(['직매입', '위탁판매', '광고료'], '직매입');
+  const p0 = settlePreset('직매입');
+  const s = el('input', { type: 'date', value: p0[0] }), e = el('input', { type: 'date', value: p0[1] });
+  const rule = el('p', { class: 'lead' });
+  const setRule = () => {
+    const p = settlePreset(kind.value); s.value = p[0]; e.value = p[1];
+    rule.textContent = { 직매입: '직매입: 월~일 마감, 다음 주 목요일 지급(공휴일이면 다음 영업일). 입고 확정 매입 + 업체배송 구매확정 주문.', 위탁판매: '위탁판매: 1~15일·16일~말일 마감, 마감일부터 10일째 지급(공휴일이면 다음 영업일). 지급액 = 결제금액 − 수수료 − 수수료 부가세.', 광고료: '광고료: 체결된 제휴입점 계약의 광고료를 청구합니다. 납부기한은 게재 시작일 전날.' }[kind.value];
+  };
+  kind.onchange = setRule; setRule();
+  const out = el('div');
+  const bPrev = el('button', { class: 'btn primary' }, '미리보기');
+  bPrev.onclick = () => act(bPrev, async () => {
+    const r = await api('settle.preview', { 구분: kind.value, 기간시작: s.value, 기간종료: e.value });
+    const ws = r.vendors.map(v => {
+      const c = el('input', { type: 'checkbox', checked: true, value: v.공급사코드 });
+      const t = v.totals;
+      return { c, row: [c, v.상호, t.건수, kind.value === '위탁판매' ? t.대상금액 : t.공급가액, kind.value === '위탁판매' ? t.수수료 : t.부가세, kind.value === '위탁판매' ? t.수수료부가세 : 0, t.지급액, v.지급예정일] };
+    });
+    const bMake = el('button', { class: 'btn seal', disabled: !ws.length }, '고른 공급사 정산서 만들기');
+    bMake.onclick = () => act(bMake, async () => {
+      const pick = ws.filter(w => w.c.checked).map(w => w.c.value);
+      if (!pick.length) throw new Error('공급사를 하나 이상 고르세요.');
+      const res = await api('settle.create', { 구분: kind.value, 기간시작: s.value, 기간종료: e.value, 공급사들: pick });
+      S.data.settlements = res.list; persistData();
+      toast('정산서 ' + res.made.length + '건을 만들었습니다(작성 상태). 확인 후 확정하세요.'); route(true);
+    });
+    const isC = kind.value === '위탁판매';
+    out.replaceChildren(el('h2', null, '미리보기: ' + r.기간시작 + ' ~ ' + r.기간종료),
+      r.warnings.length ? el('div', { class: 'note warn' }, el('b', null, '빠진 줄이 있습니다'), el('ul', null, r.warnings.map(w => el('li', null, w)))) : null,
+      gridTable(['', '공급사', '건수', isC ? '결제금액' : '공급가액', isC ? '수수료' : '부가세', isC ? '수수료 부가세' : '', kind.value === '광고료' ? '청구액' : '지급액', kind.value === '광고료' ? '납부기한' : '지급예정일'], ws.map(w => w.row), [2, 3, 4, 5, 6]),
+      el('p', { class: 'lead' }, '아직 정산되지 않은 줄을 기간 종료일까지 모두 모읍니다(늦게 올린 주문도 빠지지 않게). 정산 뒤 취소·반품된 주문은 마이너스 줄로 들어갑니다.'),
+      el('div', { class: 'actions' }, bMake));
+  });
+  const heads = (data.settlements || []).slice().sort((a, b) => String(b.id).localeCompare(String(a.id)));
+  const listRows = heads.map(h => [el('a', { href: '#/ops/settle/' + encodeURIComponent(h.id) }, h.id), h.구분, h.상호, h.기간시작 + '~' + h.기간종료, Number(h.건수), Number(h.지급액), h.지급예정일, el('span', { class: 'tag' + (h.상태 === '지급완료' ? ' ok' : h.상태 === '작성' ? ' wait' : '') }, h.상태), h.지급일 || '']);
+  return el('div', null, el('h1', null, '정산'), opsTabs('settle'),
+    el('div', { class: 'form' }, el('div', { class: 'inline' }, field('구분', kind), field('기간 시작', s), field('기간 종료', e)), rule, el('div', { class: 'actions', style: 'margin:0' }, bPrev)),
+    out, el('h2', null, '정산서'), gridTable(['정산번호', '구분', '공급사', '기간', '건수', '지급(청구)액', '예정일', '상태', '지급일'], listRows, [4, 5]));
+}
+async function viewSettleOne(id) {
+  if (!isStaff()) throw new Error('정산은 운영기획·관리자만 볼 수 있습니다.');
+  const r = await api('settle.get', { id });
+  const h = r.head;
+  const isC = h.구분 === '위탁판매';
+  const done = list => { S.data.settlements = list; persistData(); refreshSoon(false); };
+  const btns = [];
+  if (h.상태 === '작성') {
+    const b1 = el('button', { class: 'btn seal' }, '확정');
+    b1.onclick = () => act(b1, async () => { if (!confirm('확정하면 이 정산서는 지울 수 없습니다. 확정할까요?')) return; done(await api('settle.state', { id, 작업: '확정' })); toast('확정했습니다.'); route(true); });
+    const b2 = el('button', { class: 'btn ghost' }, '정산서 지우기');
+    b2.onclick = () => act(b2, async () => { if (!confirm('지우면 들어 있던 주문·매입이 다시 정산 대상이 됩니다. 지울까요?')) return; done(await api('settle.state', { id, 작업: '삭제' })); toast('지웠습니다.'); location.hash = '#/ops/settle'; });
+    btns.push(b1, b2);
+  }
+  if (h.상태 === '확정') {
+    const d = el('input', { type: 'date', value: h.지급예정일 });
+    const b = el('button', { class: 'btn seal' }, h.구분 === '광고료' ? '입금 완료' : '지급 완료');
+    b.onclick = () => act(b, async () => { done(await api('settle.state', { id, 작업: '지급완료', 지급일: d.value })); toast('처리했습니다.'); route(true); });
+    btns.push(field(h.구분 === '광고료' ? '입금일' : '지급일', d), b);
+  }
+  const bX = el('button', { class: 'btn ghost' }, '엑셀로 받기');
+  bX.onclick = () => act(bX, async () => {
+    await loadXlsx();
+    const head = ['일자', '원천', '상품', '수량', isC ? '결제금액' : '금액', '수수료', '부가세', '비고'];
+    const aoa = [['정산번호', h.id, '구분', h.구분, '공급사', h.상호], ['기간', h.기간시작 + ' ~ ' + h.기간종료, '지급예정일', h.지급예정일, '지급액', Number(h.지급액)], [], head]
+      .concat(r.lines.map(l => [l.일자, l.원천, l.상품명, Number(l.수량) || '', Number(l.금액), Number(l.수수료) || 0, Number(l.부가세) || 0, l.비고]));
+    const ws = XLSX.utils.aoa_to_sheet(aoa);
+    Object.keys(ws).forEach(k => { if (k[0] !== '!' && ws[k].t === 'n') ws[k].z = '#,##0'; });
+    ws['!cols'] = [{ wch: 12 }, { wch: 10 }, { wch: 36 }, { wch: 8 }, { wch: 14 }, { wch: 12 }, { wch: 12 }, { wch: 24 }];
+    const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, '정산서');
+    XLSX.writeFile(wb, '정산서_' + h.id + '_' + h.상호 + '.xlsx');
+  });
+  const kv = [['구분', h.구분], ['공급사', h.상호], ['기간', h.기간시작 + ' ~ ' + h.기간종료], ['건수', h.건수]]
+    .concat(isC ? [['결제금액', fmtComma(h.대상금액) + '원'], ['수수료', fmtComma(h.수수료) + '원'], ['수수료 부가세', fmtComma(h.수수료부가세) + '원']] : [['공급가액', fmtComma(h.공급가액) + '원'], ['부가세', fmtComma(h.부가세) + '원']])
+    .concat([[h.구분 === '광고료' ? '청구액' : '지급액', fmtComma(h.지급액) + '원'], [h.구분 === '광고료' ? '납부기한' : '지급예정일', h.지급예정일], ['지급(입금)일', h.지급일 || '—']]);
+  return el('div', null, el('h1', null, '정산서 ' + h.id), opsTabs('settle'),
+    guideBox({ steps: GUIDES.settle.steps, cur: { 작성: 2, 확정: 3, 지급완료: 4 }[h.상태] }),
+    el('div', { class: 'inline', style: 'gap:10px;align-items:center' }, el('span', { class: 'tag' + (h.상태 === '지급완료' ? ' ok' : '') }, h.상태)),
+    el('div', { class: 'kv', style: 'margin:12px 0' }, kv.map(([k, v]) => el('div', null, el('small', null, k), el('b', { class: 'num' }, String(v))))),
+    el('div', { class: 'actions' }, btns, bX),
+    gridTable(['일자', '원천', '상품', '수량', isC ? '결제금액' : '금액', '수수료', '부가세', '비고'], r.lines.map(l => [l.일자, l.원천, l.상품명, Number(l.수량) || '', Number(l.금액), Number(l.수수료) || 0, Number(l.부가세) || 0, l.비고]), [3, 4, 5, 6]));
+}
+
+/* 손익 */
+async function viewPL() {
+  if (!isStaff()) throw new Error('손익은 운영기획·관리자만 볼 수 있습니다.');
+  const data = await ensureData();
+  const y0 = kd(0).slice(0, 4);
+  const yr = select([String(+y0 - 1), y0, String(+y0 + 1)], y0);
+  const out = el('div');
+  async function load() {
+    const r = await api('pl.report', { year: yr.value }, { silent: true });
+    const lines = [['직매입 매출 (VAT 제외)', '직매입매출'], ['위탁 수수료', '위탁수수료'], ['광고료', '광고매출'], ['배송비 수입', '배송비매출'], ['매출 합계', '매출', 1], ['매출원가', '매출원가'], ['PG 수수료', 'PG수수료'], ['공헌이익', '공헌이익', 1], ['비용(판관비)', '비용'], ['영업이익', '영업이익', 1], ['참고: 결제금액', '결제금액'], ['참고: 판매수량', '판매수량']];
+    const head = ['항목'].concat(r.months.map(m => +m.월.slice(5) + '월')).concat(['합계']);
+    const rows = lines.map(([label, k, strong]) => [strong ? el('b', null, label) : label].concat(r.months.map(m => m[k])).concat([r.total[k]]));
+    const rate = r.total.매출 ? (r.total.영업이익 / r.total.매출 * 100).toFixed(1) + '%' : '—';
+    const w = r.warnings;
+    out.replaceChildren(
+      el('div', { class: 'kv' }, [['연 매출', fmtComma(r.total.매출) + '원'], ['공헌이익', fmtComma(r.total.공헌이익) + '원'], ['영업이익', fmtComma(r.total.영업이익) + '원'], ['영업이익률', rate]]
+        .map(([k, v]) => el('div', null, el('small', null, k), el('b', { class: 'num' + (k.includes('이익') && String(v).startsWith('-') ? ' bad' : '') }, v)))),
+      w.미연결 || w.공급가없음 || w.수수료율없음 ? el('p', { class: 'note warn' }, '계산에서 빠지거나 0으로 들어간 줄: 상품 미연결 ' + w.미연결 + ', 공급가 없음 ' + w.공급가없음 + ', 수수료율 없음 ' + w.수수료율없음 + ' — ', el('a', { href: '#/ops/check' }, '데이터 점검')) : null,
+      gridTable(head, rows, head.map((_, i) => i).slice(1)),
+      el('p', { class: 'lead' }, r.기준),
+      el('h2', null, '많이 팔린 상품 (결제금액 순)'),
+      gridTable(['상품', '거래형태', '수량', '결제금액', '매출', '이익(PG 뺌)'], r.top.map(t => [t.상품명, t.거래형태, t.수량, t.결제금액, t.매출, t.이익]), [2, 3, 4, 5]));
+  }
+  yr.onchange = () => act(null, load);
+  setTimeout(() => load().catch(e => out.replaceChildren(el('p', { class: 'note warn' }, e.message))), 0);
+  const m = el('input', { type: 'month', value: kd(0).slice(0, 7) });
+  const item = el('input', { list: 'exp-items', placeholder: '예) 인건비' });
+  const amt = numInput('', { placeholder: '예) 3,000,000' });
+  const memo = el('input', { placeholder: '메모' });
+  const bAdd = el('button', { class: 'btn primary' }, '비용 넣기');
+  bAdd.onclick = () => act(bAdd, async () => { S.data.expenses = await api('expense.save', { 월: m.value, 항목: item.value, 금액: amt.value, 메모: memo.value }); persistData(); toast('넣었습니다.'); route(true); });
+  const exps = (data.expenses || []).slice().sort((a, b) => String(b.월).localeCompare(String(a.월)));
+  return el('div', null, el('h1', null, '손익'), opsTabs('pl'),
+    el('div', { class: 'form' }, field('연도', yr)), out,
+    el('h2', null, '비용 넣기 (월별)'),
+    el('datalist', { id: 'exp-items' }, ['인건비', '임차료', '광고선전비', '물류비', '포장비', '지급수수료', '통신비', '소모품비', '기타'].map(x => el('option', { value: x }))),
+    el('div', { class: 'form' }, el('div', { class: 'inline' }, field('월', m), field('항목', item), field('금액 (원)', amt)), field('메모', memo), bAdd),
+    gridTable(['월', '항목', '금액', '메모', ''], exps.map(x => {
+      const b = el('button', { class: 'btn small ghost' }, '지우기');
+      b.onclick = () => act(b, async () => { if (!confirm(x.월 + ' ' + x.항목 + '을(를) 지울까요?')) return; S.data.expenses = await api('expense.save', { id: x.id, 삭제: true }); persistData(); route(true); });
+      return [x.월, x.항목, Number(x.금액), x.메모 || '', b];
+    }), [2]));
+}
+
+/* 데이터 점검 */
+async function viewCheck() {
+  if (!isStaff()) throw new Error('운영기획·관리자만 볼 수 있습니다.');
+  const r = await api('check.run', {});
+  const items = r.items;
+  const bad = items.filter(i => i.수준 === '오류').length;
+  return el('div', null, el('h1', null, '데이터 점검'), opsTabs('check'),
+    el('p', { class: 'note' + (bad ? ' warn' : '') }, items.length ? '오류 ' + bad + '가지, 주의 ' + (items.length - bad) + '가지가 있습니다. (' + r.at + ')' : '문제를 찾지 못했습니다. (' + r.at + ')'),
+    el('div', { class: 'list' }, items.map(i => el('a', { class: 'row', href: i.링크 || '#/ops/check' },
+      el('span', { class: 'tag ' + (i.수준 === '오류' ? 'no' : 'wait') }, i.수준),
+      el('div', { class: 'main' }, el('div', { class: 't' }, i.내용), el('div', { class: 's' }, i.영역)),
+      el('b', { class: 'num' }, fmtComma(i.건수) + '건')))),
+    el('div', { class: 'actions' }, el('button', { class: 'btn', onclick: () => route() }, '다시 점검')));
+}
+
+/* ───────── 계약서 양식 관리 (관리자) ───────── */
+const FORM_NAMES = { K1: '상품공급계약서 (본문)', T1: '별지 1 · 거래조건표 (상품공급계약에 붙음)', S1: '거래조건표 변경 확인서', S2: '판촉 약정서', S3: '독점판매 특약', AD: '광고 게재 계약서', PB: 'PB 제조 하도급계약서', LG: '물류(3PL) 위탁계약서', IT: 'IT 개발·유지보수 계약서' };
+const SEC_NAMES = { intro: '머리말', clause: '조항', closing: '맺음말', terms: '거래조건표 자리' };
+async function viewForms() {
+  if (!isAdmin()) throw new Error('계약서 양식은 관리자만 고칠 수 있습니다.');
+  const data = await ensureData();
+  const forms = data.forms || FORMS_DEFAULT;
+  return el('div', null, el('h1', null, '계약서 양식 관리'),
+    el('div', { class: 'list' }, Object.keys(FORM_NAMES).map(c => {
+      const f = forms[c] || FORMS_DEFAULT[c];
+      return el('a', { class: 'row', href: '#/form/' + c }, el('div', { class: 'main' }, el('div', { class: 't' }, FORM_NAMES[c]),
+        el('div', { class: 's' }, f._default || !f._ver ? '기본 양식' : '수정본 ' + f._ver + '판 · ' + (f._by || '') + ' · ' + String(f._at || '').slice(0, 16))),
+        el('span', { class: 'tag' + (f._default || !f._ver ? '' : ' ok') }, f._default || !f._ver ? '기본' : 'v' + f._ver));
+    })),
+    el('p', { class: 'lead' }, '여기서 고친 문구는 앞으로 작성·확정하는 계약서에 들어갑니다. 이미 확정된 계약서는 확정할 때의 문구를 그대로 보관합니다.'));
+}
+async function viewFormEdit(code) {
+  if (!isAdmin()) throw new Error('계약서 양식은 관리자만 고칠 수 있습니다.');
+  const data = await ensureData();
+  if (!FORMS_DEFAULT[code]) throw new Error('없는 양식입니다: ' + code);
+  S.wide = true;
+  const cur = (data.forms || FORMS_DEFAULT)[code];
+  const f = JSON.parse(JSON.stringify({ code, title: cur.title, party: cur.party, left: cur.left, right: cur.right, sections: cur.sections }));
+  const listBox = el('div', { class: 'secs' }), preview = el('div', { class: 'preview-wrap' });
+  let lastTa = null;
+  const kindOf = Object.keys(CONTRACT_KINDS).find(k => CONTRACT_KINDS[k].docs.includes(code));
+  const sampleTrade = select(TRADE_TYPES, '직매입'), sampleShip = select([['자사배송,업체배송', '자사배송 + 업체배송'], ['자사배송', '자사배송만'], ['업체배송', '업체배송만']], '자사배송,업체배송');
+  const keyBtns = el('div', { class: 'keys' },
+    Object.keys(KEY_META).filter(k => KEY_META[k].t !== 'calc').concat(['@회사_상호', '@회사_대표자', '@회사_주소', '@회사_사업자번호']).map(k => {
+      const b = el('button', { type: 'button', class: 'chip', title: (KEY_META[k] || {}).label || k }, k);
+      b.onclick = () => {
+        if (!lastTa) return toast('먼저 넣을 칸(본문)을 누르세요.', 'err');
+        const s = lastTa.selectionStart, e = lastTa.selectionEnd, ins = '{{' + k + '}}';
+        lastTa.value = lastTa.value.slice(0, s) + ins + lastTa.value.slice(e);
+        lastTa.dispatchEvent(new Event('input')); lastTa.focus(); lastTa.setSelectionRange(s + ins.length, s + ins.length);
+      };
+      return b;
+    }));
+  let timer = null;
+  function refresh() {
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      const ctx = { trade: sampleTrade.value, ships: sampleTrade.value === '제휴입점' ? [] : sampleShip.value.split(',') };
+      const doc = compileForm(f, ctx);
+      const vals = {};
+      docsKeys([doc]).forEach(k => { const m = metaOf(k); vals[k] = m.ex ? (m.t === 'won' ? fmtComma(m.ex) : m.ex) : (k === '거래형태' ? ctx.trade : ''); });
+      vals.상대_상호 = '(예시) 공급사'; vals.상대_대표자 = '홍길동';
+      if (doc.blocks.some(b => b.t === 'terms')) vals._terms = { title: '직매입 상품 (예시)', head: ['상품코드', '상품명', '공급가'], rows: [['P0001', '사과 5kg', '28,000원']] };
+      const pages = renderPaged([doc], vals, S.settings);
+      const n = pages.querySelectorAll('.pg').length;
+      preview.replaceChildren(el('p', { class: 'note' + (n > 3 ? ' warn' : '') }, '미리보기 ' + n + '쪽 · 조항 ' + doc.blocks.filter(b => b.t === 'h').length + '개' + (n > 3 ? ' — 3쪽을 넘습니다.' : '')), pages);
+    }, 200);
+  }
+  function draw() {
+    listBox.replaceChildren(...f.sections.map((s, i) => {
+      const card = el('div', { class: 'sec' });
+      const head = el('div', { class: 'inline' }, el('b', null, (s.type === 'clause' ? '조항 ' + (f.sections.slice(0, i + 1).filter(x => x.type === 'clause').length) : SEC_NAMES[s.type])));
+      const mv = (d) => { const j = i + d; if (j < 0 || j >= f.sections.length) return; const t = f.sections[i]; f.sections[i] = f.sections[j]; f.sections[j] = t; draw(); refresh(); };
+      const up = el('button', { class: 'btn small ghost', type: 'button', title: '위로' }, '↑'); up.onclick = () => mv(-1);
+      const dn = el('button', { class: 'btn small ghost', type: 'button', title: '아래로' }, '↓'); dn.onclick = () => mv(1);
+      const del = el('button', { class: 'btn small ghost', type: 'button' }, '지우기');
+      del.onclick = () => { if (s.type === 'terms') return toast('거래조건표 자리는 지울 수 없습니다.', 'err'); if (confirm('이 ' + SEC_NAMES[s.type] + '을(를) 지울까요?')) { f.sections.splice(i, 1); draw(); refresh(); } };
+      appendKids(head, up, dn, del);
+      card.appendChild(head);
+      if (s.type === 'clause') {
+        const t = el('input', { value: s.title || '', placeholder: '조항 제목 (예: 품질 보증)' });
+        t.addEventListener('input', () => { s.title = t.value; refresh(); });
+        card.appendChild(field('제목', t));
+        const when = el('div', { class: 'checks' }, el('span', { class: 's' }, '적용 조건 (비우면 모든 계약)'), FORM_TAGS.map(tag => {
+          const c = el('input', { type: 'checkbox', checked: (s.when || []).includes(tag) });
+          c.onchange = () => { s.when = FORM_TAGS.filter(x => x === tag ? c.checked : (s.when || []).includes(x)); refresh(); };
+          return el('label', { class: 'check' }, c, tag);
+        }));
+        card.appendChild(when);
+      }
+      if (s.type !== 'terms') {
+        const ta = el('textarea', { value: s.body || '', rows: Math.min(12, Math.max(3, String(s.body || '').split('\n').length + 1)) });
+        ta.addEventListener('focus', () => { lastTa = ta; });
+        ta.addEventListener('input', () => { s.body = ta.value; refresh(); });
+        card.appendChild(field('본문', ta, '한 줄이 한 문단입니다. ①②로 항을, "1. "로 목록을, | 칸 | 칸 | 으로 표를 만듭니다.'));
+      } else card.appendChild(el('p', { class: 'lead' }, '여기에 상품 데이터로 만든 거래조건표가 들어갑니다.'));
+      const addHere = el('button', { class: 'btn small', type: 'button' }, '+ 아래에 조항 추가');
+      addHere.onclick = () => { f.sections.splice(i + 1, 0, { type: 'clause', title: '새 조항', when: [], body: '① ' }); draw(); refresh(); };
+      card.appendChild(addHere);
+      return card;
+    }));
+  }
+  const title = el('input', { value: f.title });
+  title.addEventListener('input', () => { f.title = title.value; refresh(); });
+  sampleTrade.onchange = refresh; sampleShip.onchange = refresh;
+  const bSave = el('button', { class: 'btn seal' }, '저장 (새 판)');
+  bSave.onclick = () => act(bSave, async () => {
+    const memo = prompt('무엇을 바꿨는지 짧게 적어 주세요 (이력에 남습니다)', '');
+    if (memo === null) return;
+    S.data.forms = await api('form.save', { code, form: f, 메모: memo });
+    persistData(); toast('저장했습니다. 앞으로 만드는 계약서에 들어갑니다.'); route(true);
+  });
+  const bReset = el('button', { class: 'btn ghost' }, '기본 양식으로 되돌리기');
+  bReset.onclick = () => act(bReset, async () => {
+    if (!confirm('처음 제공된 기본 양식으로 되돌립니다(새 판으로 저장). 계속할까요?')) return;
+    S.data.forms = await api('form.reset', { code }); persistData(); toast('기본 양식으로 되돌렸습니다.'); route(true);
+  });
+  const hist = el('details', null, el('summary', null, '저장 이력'));
+  hist.addEventListener('toggle', async () => {
+    if (!hist.open || hist.querySelector('.list')) return;
+    const h = await api('form.history', { code }, { silent: true });
+    hist.appendChild(el('div', { class: 'list' }, h.length ? h.map(x => el('div', { class: 'row' }, el('div', { class: 'main' }, el('div', { class: 't' }, 'v' + x.버전 + ' · ' + x.상태), el('div', { class: 's' }, x.수정자 + ' · ' + x.수정일시 + (x.메모 ? ' · ' + x.메모 : ''))))) : el('div', { class: 'empty' }, '아직 고친 적이 없습니다(기본 양식).')));
+  });
+  draw(); refresh();
+  return el('div', null, el('h1', null, FORM_NAMES[code]),
+    el('div', { class: 'split' },
+      el('div', null,
+        el('div', { class: 'form' }, field('양식 제목', title),
+          kindOf === 'K1' && code === 'K1' ? el('div', { class: 'inline' }, field('미리보기 거래형태', sampleTrade), field('미리보기 배송방식', sampleShip)) : null,
+          el('details', null, el('summary', null, '입력값 넣기 (본문을 누른 뒤 단추를 누르면 그 자리에 들어감)'), keyBtns,
+            el('p', { class: 'lead' }, '목록에 없는 이름을 {{새이름}}처럼 쓰면 계약 작성 화면에 그 이름의 입력칸이 새로 생깁니다.'))),
+        listBox,
+        el('div', { class: 'actions' }, bSave, bReset, el('a', { class: 'btn ghost', href: '#/forms' }, '목록으로')),
+        hist),
+      preview));
+}
+
 (async function start() {
   const saved = sessionStorage.getItem('whaps');
   if (saved) {
