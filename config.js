@@ -1,5 +1,5 @@
 // 화프스 설정 — Apps Script 웹앱 주소(…/exec)만 넣습니다.
 // 이 파일은 공개되어도 괜찮습니다. 비밀번호·PIN·키는 절대 넣지 마세요(판단은 모두 서버가 합니다).
 window.WHAPS_CONFIG = {
-  API_URL: 'https://script.google.com/macros/s/https://script.google.com/macros/s/AKfycbzfe0zLONrNHMb3bsKSqR1R1M43szG0tBX1y8uHAWrj8iHKbE_umReap1SsnqT_6asv/exec'
+  API_URL: 'https://script.google.com/macros/s/AKfycbzfe0zLONrNHMb3bsKSqR1R1M43szG0tBX1y8uHAWrj8iHKbE_umReap1SsnqT_6asv/exec'
 };
