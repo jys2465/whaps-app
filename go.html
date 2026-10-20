@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>이동 중… · WHITE PRICE</title>
+<style>
+  body { margin: 0; font-family: 'Noto Sans KR', system-ui, sans-serif; background: #f6f7f9; color: #1b2433; display: grid; place-items: center; min-height: 100vh; }
+  p { font-size: 15px; text-align: center; padding: 0 16px; }
+  a { color: #1b2a4a; }
+</style>
+<script src="config.js"></script>
+</head>
+<body>
+<p id="msg">판매 페이지로 이동하고 있습니다…</p>
+<script>
+// 제휴입점 광고 추적 링크: 클릭을 화프스에 기록하고 공급사 판매 페이지로 보냅니다.
+// 기기마다 무작위 번호를 하나 만들어 같은 기기의 24시간 안 반복 클릭을 1회만 셉니다(개인정보는 보내지 않음).
+(function () {
+  var q = new URLSearchParams(location.search);
+  var dev = '';
+  try { dev = localStorage.getItem('wp_dev') || ''; if (!dev) { dev = (crypto.randomUUID ? crypto.randomUUID() : String(Math.random()).slice(2) + Date.now()); localStorage.setItem('wp_dev', dev); } } catch (e) { dev = ''; }
+  var ua = navigator.userAgent || '';
+  var bot = !!navigator.webdriver || /bot|crawl|spider|slurp|preview|headless|facebookexternalhit|kakaotalk-scrap|yeti|daum/i.test(ua);
+  var internal = false;
+  try { internal = !!sessionStorage.getItem('whaps') || !!localStorage.getItem('whaps_internal'); } catch (e) { /* 저장소를 못 쓰면 외부로 봄 */ }
+  var api = (window.WHAPS_CONFIG || {}).API_URL || '';
+  var done = false;
+  function go(url) {
+    if (done) return; done = true;
+    if (url) location.replace(url);
+    else document.getElementById('msg').innerHTML = '판매 페이지를 찾지 못했습니다. <a href="/">WHITE PRICE로 돌아가기</a>';
+  }
+  setTimeout(function () { go(''); }, 6000);
+  fetch(api, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+    body: JSON.stringify({ action: 'ad.click', payload: { a: q.get('a') || '', p: q.get('p') || '', d: dev, bot: bot, internal: internal } }) })
+    .then(function (r) { return r.json(); })
+    .then(function (j) { go(j && j.ok && j.data ? j.data.url : ''); })
+    .catch(function () { go(''); });
+})();
+</script>
+</body>
+</html>

@@ -259,3 +259,10 @@ nav.tabs a { min-width: 0; }
 nav.tabs { grid-template-columns: repeat(6, 1fr) !important; }
 nav.tabs.two { grid-template-columns: repeat(2, 1fr) !important; }
 nav.tabs a { font-size: 11.5px; }
+/* v5 운영 화면: 좁은 화면에서 입력 줄이 넘치지 않게 */
+.form .inline { flex-wrap: wrap; align-items: flex-end; }
+.form .inline > .field { flex: 1 1 150px; min-width: 0; }
+.form .inline > .btn { flex: 0 0 auto; white-space: nowrap; }
+.btn { white-space: nowrap; }
+.chips { flex-wrap: wrap; }
+.gridwrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
